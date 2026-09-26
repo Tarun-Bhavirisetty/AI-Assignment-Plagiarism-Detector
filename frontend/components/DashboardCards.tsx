@@ -25,7 +25,7 @@ export default function DashboardCards({ total, dupes, fileStats = {} }: StatsPr
           <Copy className="w-8 h-8 text-orange-500" />
         </div>
         <div>
-          <p className="text-muted-foreground text-sm font-medium">Duplicates Detected</p>
+          <p className="text-muted-foreground text-sm font-medium">High-Similarity Submissions</p>
           <h4 className="text-3xl font-bold">{dupes}</h4>
         </div>
       </div>

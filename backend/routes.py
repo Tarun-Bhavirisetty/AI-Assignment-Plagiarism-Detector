@@ -177,113 +177,154 @@ async def upload_file(file: UploadFile = File(...), section_name: str = Form(Non
     mime_type, _ = mimetypes.guess_type(file_path)
     file_type = mime_type or "application/octet-stream"
 
-    # Extract Metadata
-    metadata_json = extract_metadata(file_path, file_type)
-    
-    # Extract Text
-    original_text, cleaned_text, pages_text = "", "", []
-    if ext in [".pdf", ".docx", ".txt"] or "text" in file_type:
-        original_text, cleaned_text, pages_text = extract_and_clean(file_path, file_type)
-        metadata_json["extracted_text"] = bool(original_text)
-        metadata_json["pages_text"] = pages_text
-    
-    # 1. Exact Duplicate Check (SHA256)
     exact_hash = get_exact_hash(file_path)
-    
-    # Check globally or per user (let's do globally for overall duplicates)
-    exact_match = db.query(models.Upload).filter(models.Upload.hash == exact_hash).first()
-    
-    similarity_score = 0.0
-    is_duplicate = False
-    duplicate_type = "Unique File"
-    matched_file = None
-    matched_file_id = None
-    matched_upload_time = None
-    matched_student = None
-    
-    if exact_match:
-        similarity_score = 100.0
-        is_duplicate = True
-        duplicate_type = "Exact Duplicate"
-        matched_file = exact_match.file_name
-        matched_file_id = exact_match.id
-        matched_upload_time = exact_match.upload_time
-        matched_student = exact_match.owner.name if exact_match.owner else "Unknown"
-    else:
-        # 2. Similar Content Detection
-        if "image" in file_type:
-            phash = get_image_phash(file_path)
-            metadata_json["phash"] = phash
-            # Check for similar images in DB
-            all_images = db.query(models.Upload).filter(models.Upload.file_type.like('%image%')).all()
-            for img in all_images:
-                if img.metadata_json and img.metadata_json.get("phash"):
-                    sim = calculate_phash_similarity(phash, img.metadata_json.get("phash"))
-                    if sim > similarity_score:
-                        similarity_score = sim
-                        matched_file = img.file_name
-                        matched_file_id = img.id
-                        matched_upload_time = img.upload_time
-                        matched_student = img.owner.name if img.owner else "Unknown"
-                        
-            if similarity_score >= 90: # Arbitrary threshold
-                is_duplicate = True
-                duplicate_type = "Similar Duplicate"
-                
-        elif "text" in file_type or ext in [".pdf", ".docx", ".txt"]:
-            # Use cleaned text for embedding
-            text_content = cleaned_text if cleaned_text else ""
-            if not text_content and "text" in file_type:
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    text_content = f.read(2000)
+
+    try:
+        # Extract Metadata
+        metadata_json = extract_metadata(file_path, file_type)
+        
+        # Extract Text
+        original_text, cleaned_text, pages_text = "", "", []
+        if ext in [".pdf", ".docx", ".txt"] or "text" in file_type:
+            original_text, cleaned_text, pages_text, structure = extract_and_clean(file_path, file_type)
+            metadata_json["extracted_text"] = bool(original_text)
+            metadata_json["pages_text"] = pages_text
+            metadata_json["document_structure"] = structure
+        
+        # 1. Exact Duplicate Check (SHA256)
+        # Check globally or per user (let's do globally for overall duplicates)
+        exact_match = db.query(models.Upload).filter(models.Upload.hash == exact_hash).first()
+        
+        similarity_score = 0.0
+        is_duplicate = False
+        duplicate_type = "Unique File"
+        matched_file = None
+        matched_file_id = None
+        matched_upload_time = None
+        matched_student = None
+        
+        if exact_match:
+            is_duplicate = True
+            duplicate_type = "Exact Duplicate"
+            matched_file = exact_match.file_name
+            matched_file_id = exact_match.id
+            matched_upload_time = exact_match.upload_time
+            matched_student = exact_match.owner.name if exact_match.owner else "Unknown"
+            metadata_json["matched_upload_id"] = matched_file_id
             
-            if text_content.strip():
-                embedding = generate_text_embedding(text_content[:2000]) # Chroma uses first 2000 chars for overall similarity
-                search_result = search_similar(embedding)
-                if search_result.get("is_similar"):
-                    similarity_score = search_result.get("similarity_score", 0.0)
+            # Recalculate true similarity immediately
+            matched_text = exact_match.extracted_text if exact_match.extracted_text else ""
+            comp = compare_texts(original_text, matched_text, pages_text, is_file_exact=True)
+            similarity_score = comp.get("overall_similarity", 100.0)
+        else:
+            # 2. Similar Content Detection
+            if "image" in file_type:
+                phash = get_image_phash(file_path)
+                metadata_json["phash"] = phash
+                # Check for similar images in DB
+                all_images = db.query(models.Upload).filter(models.Upload.file_type.like('%image%')).all()
+                for img in all_images:
+                    if img.metadata_json and img.metadata_json.get("phash"):
+                        sim = calculate_phash_similarity(phash, img.metadata_json.get("phash"))
+                        if sim > similarity_score:
+                            similarity_score = sim
+                            matched_file = img.file_name
+                            matched_file_id = img.id
+                            matched_upload_time = img.upload_time
+                            matched_student = img.owner.name if img.owner else "Unknown"
+                            
+                if similarity_score >= 90: # Arbitrary threshold
                     is_duplicate = True
                     duplicate_type = "Similar Duplicate"
-                    # For Chroma we only have matched_id (which is filename here)
-                    matched_file = search_result.get("matched_id")
+                    if matched_file_id:
+                        metadata_json["matched_upload_id"] = matched_file_id
                     
-                    # Fetch from db to get exact info
-                    db_match = db.query(models.Upload).filter(models.Upload.file_name == matched_file).first()
-                    if db_match:
-                        matched_file_id = db_match.id
-                        matched_upload_time = db_match.upload_time
-                        matched_student = db_match.owner.name if db_match.owner else "Unknown"
+            elif "text" in file_type or ext in [".pdf", ".docx", ".txt"]:
+                # Use cleaned text for embedding
+                text_content = cleaned_text if cleaned_text else ""
+                if not text_content and "text" in file_type:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        text_content = f.read(2000)
                 
-                # Add to Chroma
-                add_to_chroma(unique_filename, embedding, {"file_name": file.filename})
-                
-    # Save to database
-    new_upload = models.Upload(
-        user_id=current_user.id,
-        file_name=file.filename,
-        file_type=file_type,
-        hash=exact_hash,
-        file_path=file_path,
-        similarity_score=similarity_score if similarity_score > 0 else None,
-        metadata_json=metadata_json,
-        section_name=section_name,
-        assignment_title=assignment_title,
-        duplicate_type=duplicate_type if is_duplicate else None,
-        matched_student=matched_student,
-        extracted_text=original_text,
-        cleaned_text=cleaned_text
-    )
-    db.add(new_upload)
-    db.commit()
-    db.refresh(new_upload)
-    
-    return {
-        "message": "File uploaded successfully",
-        "upload_id": new_upload.id,
-        "file_name": new_upload.file_name,
-        "upload_time": new_upload.upload_time,
-        "metadata": metadata_json
-    }
+                if text_content.strip():
+                    embedding = generate_text_embedding(text_content[:2000]) # Chroma uses first 2000 chars for overall similarity
+                    search_result = search_similar(embedding)
+                    if search_result.get("is_similar"):
+                        is_duplicate = True
+                        duplicate_type = "Similar Duplicate"
+                        # For Chroma we only have matched_id (which is filename here)
+                        matched_file = search_result.get("matched_id")
+                        
+                        # Fetch from db to get exact info
+                        db_match = db.query(models.Upload).filter(models.Upload.file_name == matched_file).first()
+                        if db_match:
+                            matched_file_id = db_match.id
+                            matched_upload_time = db_match.upload_time
+                            matched_student = db_match.owner.name if db_match.owner else "Unknown"
+                            metadata_json["matched_upload_id"] = matched_file_id
+                            
+                            # Run exact rigorous comparison to get the authoritative overall_similarity score
+                            matched_text = db_match.extracted_text if db_match.extracted_text else ""
+                            comp = compare_texts(original_text, matched_text, pages_text, is_file_exact=False)
+                            similarity_score = comp.get("overall_similarity", search_result.get("similarity_score", 0.0))
+                        else:
+                            similarity_score = search_result.get("similarity_score", 0.0)
+                    
+                    # Add to Chroma
+                    add_to_chroma(unique_filename, embedding, {"file_name": file.filename})
+                    
+        # Save to database
+        new_upload = models.Upload(
+            user_id=current_user.id,
+            file_name=file.filename,
+            file_type=file_type,
+            hash=exact_hash,
+            file_path=file_path,
+            similarity_score=similarity_score if similarity_score > 0 else None,
+            metadata_json=metadata_json,
+            section_name=section_name,
+            assignment_title=assignment_title,
+            duplicate_type=duplicate_type if is_duplicate else None,
+            matched_student=matched_student,
+            extracted_text=original_text,
+            cleaned_text=cleaned_text
+        )
+        db.add(new_upload)
+        db.commit()
+        db.refresh(new_upload)
+        
+        return {
+            "success": True,
+            "message": "File uploaded successfully",
+            "upload_id": new_upload.id,
+            "file_name": new_upload.file_name,
+            "upload_time": new_upload.upload_time,
+            "metadata": metadata_json
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        
+        # Save failed record
+        failed_upload = models.Upload(
+            user_id=current_user.id,
+            file_name=file.filename,
+            file_type=file_type,
+            hash=exact_hash,
+            file_path=file_path,
+            section_name=section_name,
+            assignment_title=assignment_title,
+            metadata_json={"processing_status": "failed", "error": str(e)}
+        )
+        db.add(failed_upload)
+        db.commit()
+        
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=500, content={
+            "success": False,
+            "error_code": "DOCUMENT_PROCESSING_ERROR",
+            "message": "Upload failed: Unable to process the document."
+        })
 
 @router.get("/uploads")
 def get_uploads(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -483,7 +524,12 @@ def compare_uploads(upload_id: int, current_user: models.User = Depends(get_admi
     
     # Attempt to find the matched upload's content
     matched_upload = None
-    if upload.matched_student:
+    
+    if upload.metadata_json and upload.metadata_json.get("matched_upload_id"):
+        matched_upload_id = upload.metadata_json.get("matched_upload_id")
+        matched_upload = db.query(models.Upload).filter(models.Upload.id == matched_upload_id).first()
+        
+    if not matched_upload and upload.matched_student:
         matched_user = db.query(models.User).filter(models.User.name == upload.matched_student).first()
         if matched_user:
             matched_upload = db.query(models.Upload).filter(
@@ -501,20 +547,37 @@ def compare_uploads(upload_id: int, current_user: models.User = Depends(get_admi
     
     upload_pages = upload.metadata_json.get("pages_text", []) if isinstance(upload.metadata_json, dict) else []
     
-    comparison_data = compare_texts(original_text, matched_text, upload_pages)
+    comparison_data = compare_texts(original_text, matched_text, upload_pages, is_file_exact=(upload.similarity_score == 100.0))
+    overall_similarity = comparison_data.get("overall_similarity", upload.similarity_score)
     
     return {
-        "uploaded_file": upload.file_name,
-        "matched_student": upload.matched_student or (matched_upload.owner.name if matched_upload and matched_upload.owner else "Unknown"),
-        "similarity_score": upload.similarity_score,
-        "section_name": upload.section_name,
-        "assignment_title": upload.assignment_title,
+        "upload_id": upload.id,
+        "reference_upload_id": matched_upload.id if matched_upload else None,
+        
+        "uploaded_document": {
+            "id": upload.id,
+            "file_name": upload.file_name,
+            "section_name": upload.section_name,
+            "assignment_title": upload.assignment_title,
+            "upload_time": upload.upload_time.strftime("%d-%m-%Y | %I:%M %p IST") if upload.upload_time else "Unknown"
+        },
+        
+        "reference_document": {
+            "id": matched_upload.id if matched_upload else None,
+            "file_name": matched_upload.file_name if matched_upload else "Unknown Reference",
+            "matched_student": matched_upload.owner.name if matched_upload and matched_upload.owner else (upload.matched_student or "Unknown"),
+            "upload_time": matched_upload.upload_time.strftime("%d-%m-%Y | %I:%M %p IST") if matched_upload and matched_upload.upload_time else "Unknown"
+        },
+        
+        "overall_similarity": overall_similarity,
         "duplicate_type": upload.duplicate_type,
-        "upload_time": upload.upload_time.strftime("%d-%m-%Y | %I:%M %p IST") if upload.upload_time else "Unknown",
+        
         "uploaded_highlighted": comparison_data["uploaded_highlighted"],
         "matched_highlighted": comparison_data["matched_highlighted"],
         "ai_summary": comparison_data.get("ai_summary", {}),
-        "page_heatmap": comparison_data.get("page_heatmap", [])
+        "page_heatmap": comparison_data.get("page_heatmap", []),
+        "breakdown": comparison_data.get("breakdown", {}),
+        "match_statistics": comparison_data.get("match_statistics", {})
     }
 
 @router.get("/admin/download/highlighted/{upload_id}")
@@ -527,7 +590,11 @@ def download_highlighted_pdf(upload_id: int, type: str = "uploaded", current_use
         raise HTTPException(status_code=404, detail="Upload not found")
 
     matched_upload = None
-    if upload.matched_student:
+    if upload.metadata_json and upload.metadata_json.get("matched_upload_id"):
+        matched_upload_id = upload.metadata_json.get("matched_upload_id")
+        matched_upload = db.query(models.Upload).filter(models.Upload.id == matched_upload_id).first()
+        
+    if not matched_upload and upload.matched_student:
         matched_user = db.query(models.User).filter(models.User.name == upload.matched_student).first()
         if matched_user:
             matched_upload = db.query(models.Upload).filter(
@@ -536,6 +603,7 @@ def download_highlighted_pdf(upload_id: int, type: str = "uploaded", current_use
             ).first()
             if not matched_upload:
                 matched_upload = db.query(models.Upload).filter(models.Upload.user_id == matched_user.id).order_by(models.Upload.upload_time.desc()).first()
+    
     if not matched_upload and upload.similarity_score == 100.0:
         matched_upload = db.query(models.Upload).filter(models.Upload.hash == upload.hash, models.Upload.id < upload.id).first()
 
@@ -545,27 +613,50 @@ def download_highlighted_pdf(upload_id: int, type: str = "uploaded", current_use
 
     original_text = upload.extracted_text or ""
     matched_text = matched_upload.extracted_text if matched_upload else ""
+    upload_pages = upload.metadata_json.get("pages_text", []) if isinstance(upload.metadata_json, dict) else []
     
-    comparison_data = compare_texts(original_text, matched_text)
+    comparison_data = compare_texts(original_text, matched_text, upload_pages, is_file_exact=(upload.similarity_score == 100.0))
     highlights = comparison_data["uploaded_highlighted"] if type == "uploaded" else comparison_data["matched_highlighted"]
 
     try:
         doc = fitz.open(target_upload.file_path)
         for page in doc:
+            rects_to_highlight = {"red": [], "yellow": [], "orange": []}
+            
             for h in highlights:
-                if h["color"] in ["red", "yellow"]:
+                if h["color"] in ["red", "yellow", "orange"]:
                     # Search text handling newlines and spaces loosely
                     text_to_search = h["text"].replace('\n', ' ').strip()
                     if len(text_to_search) < 5:
                         continue # too short to highlight safely
+                        
                     insts = page.search_for(text_to_search)
-                    for inst in insts:
-                        annot = page.add_highlight_annot(inst)
-                        if h["color"] == "red":
-                            annot.set_colors(stroke=(1, 0.4, 0.4))
-                        elif h["color"] == "yellow":
-                            annot.set_colors(stroke=(1, 0.8, 0.4))
-                        annot.update()
+                    
+                    # Fallback for line breaks
+                    if not insts and len(text_to_search) > 30:
+                        words = text_to_search.split()
+                        if len(words) > 6:
+                            part1 = " ".join(words[:len(words)//2])
+                            part2 = " ".join(words[len(words)//2:])
+                            insts.extend(page.search_for(part1))
+                            insts.extend(page.search_for(part2))
+                            
+                    if insts:
+                        rects_to_highlight[h["color"]].extend(insts)
+            
+            # Apply merged highlights
+            for color, rects in rects_to_highlight.items():
+                if not rects: continue
+                # In PyMuPDF, add_highlight_annot takes a list of quads/rects and merges them implicitly
+                annot = page.add_highlight_annot(rects)
+                if annot:
+                    if color == "red":
+                        annot.set_colors(stroke=(1, 0.4, 0.4))
+                    elif color == "yellow":
+                        annot.set_colors(stroke=(1, 0.8, 0.4))
+                    elif color == "orange":
+                        annot.set_colors(stroke=(1, 0.6, 0.2))
+                    annot.update()
                         
         pdf_bytes = doc.write()
         doc.close()
@@ -628,7 +719,7 @@ def reprocess_uploads(current_user: models.User = Depends(get_admin_user), db: S
         ext = os.path.splitext(upload.file_path)[1]
         
         if ext in [".pdf", ".docx", ".txt"] or "text" in upload.file_type:
-            original_text, cleaned_text, pages_text = extract_and_clean(upload.file_path, upload.file_type)
+            original_text, cleaned_text, pages_text, structure = extract_and_clean(upload.file_path, upload.file_type)
             upload.extracted_text = original_text
             upload.cleaned_text = cleaned_text
             

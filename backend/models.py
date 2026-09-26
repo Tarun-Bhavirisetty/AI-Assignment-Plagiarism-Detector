@@ -45,3 +45,43 @@ class Upload(Base):
     cleaned_text = Column(String, nullable=True)
 
     owner = relationship("User", back_populates="uploads")
+
+class SimilarityMatch(Base):
+    __tablename__ = "similarity_matches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source_upload_id = Column(Integer, ForeignKey("uploads.id"), index=True)
+    target_upload_id = Column(Integer, ForeignKey("uploads.id"), index=True)
+    match_type = Column(String) # exact, lexical, semantic, image, structural
+    similarity_score = Column(Float)
+    source_page = Column(Integer, nullable=True)
+    target_page = Column(Integer, nullable=True)
+    matched_text = Column(String, nullable=True)
+    
+class DocumentSegment(Base):
+    __tablename__ = "document_segments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    upload_id = Column(Integer, ForeignKey("uploads.id"), index=True)
+    segment_type = Column(String) # sentence, paragraph, question
+    segment_index = Column(Integer)
+    page_number = Column(Integer, nullable=True)
+    content = Column(String)
+
+class PlagiarismCase(Base):
+    __tablename__ = "plagiarism_cases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    upload_id = Column(Integer, ForeignKey("uploads.id"), unique=True)
+    status = Column(String, default="New") # New, Under Review, Resolved, Dismissed
+    teacher_notes = Column(String, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone(timedelta(hours=5, minutes=30))))
+    updated_at = Column(DateTime, onupdate=lambda: datetime.now(timezone(timedelta(hours=5, minutes=30))))
+
+class DetectionConfiguration(Base):
+    __tablename__ = "detection_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String, unique=True, index=True)
+    value_float = Column(Float, nullable=True)
+    value_string = Column(String, nullable=True)

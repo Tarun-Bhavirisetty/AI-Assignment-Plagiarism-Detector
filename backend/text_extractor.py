@@ -2,6 +2,13 @@ import os
 import fitz  # PyMuPDF
 import docx
 import re
+try:
+    import pytesseract
+    from PIL import Image
+    import io
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
 
 def clean_text(text: str) -> str:
     """Normalize whitespace and remove invalid chars."""
@@ -11,6 +18,19 @@ def clean_text(text: str) -> str:
     text = text.replace('\x00', '')
     return text.strip()
 
+def extract_questions(text: str) -> list[dict]:
+    """Finds questions like Q1., Question 1:, 1), etc."""
+    questions = []
+    pattern = r'(?i)(?:Q|Question\s*)\d+[\.\:\)]'
+    matches = list(re.finditer(pattern, text))
+    
+    for i, match in enumerate(matches):
+        start = match.start()
+        end = matches[i+1].start() if i + 1 < len(matches) else len(text)
+        content = text[start:end].strip()
+        questions.append({"id": match.group(0), "content": content})
+    return questions
+
 def extract_text_from_pdf(file_path: str) -> tuple[str, list[str]]:
     text = ""
     pages_text = []
@@ -18,6 +38,14 @@ def extract_text_from_pdf(file_path: str) -> tuple[str, list[str]]:
         doc = fitz.open(file_path)
         for page in doc:
             t = page.get_text()
+            if not t.strip() and TESSERACT_AVAILABLE:
+                try:
+                    pix = page.get_pixmap()
+                    img = Image.open(io.BytesIO(pix.tobytes()))
+                    t = pytesseract.image_to_string(img)
+                except Exception as ocr_e:
+                    print(f"OCR skipped for page: {ocr_e}")
+                    
             if t:
                 text += t + "\n"
                 pages_text.append(t)
@@ -60,5 +88,13 @@ def extract_and_clean(file_path: str, file_type: str) -> tuple[str, str, list]:
     elif ext == ".txt" or "text" in file_type:
         original = extract_text_from_txt(file_path)
     
+    # Clean text to normalize whitespace and newlines
     cleaned = clean_text(original)
-    return original, cleaned, pages_text
+    
+    # Extract basic structural metadata
+    structure = {
+        "questions": extract_questions(cleaned),
+        "paragraphs": len(cleaned.split('\n\n'))
+    }
+    
+    return original, cleaned, pages_text, structure

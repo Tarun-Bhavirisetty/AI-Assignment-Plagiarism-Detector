@@ -81,7 +81,7 @@ export default function UploadBox() {
       });
       setResult(res.data);
     } catch (err: any) {
-      setError(err.response?.data?.detail || "Upload failed");
+      setError(err.response?.data?.message || err.response?.data?.detail || "Upload failed: Unable to process the document.");
     } finally {
       setUploading(false);
     }
@@ -160,7 +160,7 @@ export default function UploadBox() {
                 disabled={uploading}
                 className="px-4 py-2 bg-primary text-white text-sm font-medium rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50 flex items-center shadow-lg shadow-primary/20"
               >
-                {uploading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : 'Analyze'}
+                {uploading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Processing...</> : 'Analyze'}
               </button>
             )}
           </div>
