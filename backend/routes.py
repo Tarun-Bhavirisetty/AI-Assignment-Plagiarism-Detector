@@ -1,10 +1,11 @@
 import os
+import re
 import uuid
 import mimetypes
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 import hashlib
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from pydantic import BaseModel
@@ -17,26 +18,32 @@ from duplicate_detector import get_exact_hash, get_image_phash, calculate_phash_
 from ai_engine import generate_text_embedding, search_similar, add_to_chroma
 from text_extractor import extract_and_clean
 from comparison import compare_texts
+from email_service import (
+    generate_verification_token, hash_token, send_verification_email,
+    get_smtp_config, validate_smtp_config, verify_smtp_connection
+)
 
 router = APIRouter()
-
-# Password hashing
 
 # JWT configuration
 SECRET_KEY = os.getenv("SECRET_KEY", "secret")
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
 # Ensure uploads directory exists
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+EMAIL_REGEX = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
 
 # --- Schemas ---
 class UserCreate(BaseModel):
     name: str
     email: str
     password: str
+    registration_number: Optional[str] = None
+    confirm_password: Optional[str] = None
+    department: Optional[str] = "Computer Science"
 
 class UserLogin(BaseModel):
     email: str
@@ -46,13 +53,37 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     role: str
+    user: Optional[dict] = None
+
+class VerifyEmailRequest(BaseModel):
+    token: str
+
+class ResendVerificationRequest(BaseModel):
+    email: str
+
+class RoleUpdate(BaseModel):
+    role: str
+    department: Optional[str] = None
 
 class SectionCreate(BaseModel):
     name: str
+    department: Optional[str] = "Computer Science"
 
 class SectionResponse(BaseModel):
     id: int
     name: str
+    department: Optional[str] = None
+
+class EvaluatorSectionCreate(BaseModel):
+    evaluator_id: int
+    section_id: int
+
+class EvaluationSubmit(BaseModel):
+    marks: Optional[float] = None
+    max_marks: Optional[float] = 100.0
+    status: str
+    decision: Optional[str] = None
+    comments: Optional[str] = None
 
 class AnalyticsResponse(BaseModel):
     total_uploads: int
@@ -79,7 +110,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
+        expire = datetime.utcnow() + timedelta(minutes=60)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
@@ -87,6 +118,11 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 # Dependency to get current user
 from fastapi.security import OAuth2PasswordBearer
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+def normalize_role(role: Optional[str]) -> str:
+    if not role or role in ["user", "student"]:
+        return "student"
+    return role.lower()
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
@@ -104,41 +140,215 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     user = db.query(models.User).filter(models.User.id == int(user_id)).first()
     if user is None:
         raise credentials_exception
-    return user
-
-def get_admin_user(current_user: models.User = Depends(get_current_user)):
-    if current_user.role != "admin":
+    if not user.is_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied"
+            detail="Email not verified. Please verify your email before accessing this service."
+        )
+    return user
+
+def require_roles(*allowed_roles: str):
+    def role_checker(current_user: models.User = Depends(get_current_user)):
+        user_role = normalize_role(current_user.role)
+        normalized_allowed = [normalize_role(r) for r in allowed_roles]
+        if user_role not in normalized_allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied: required role in {allowed_roles}"
+            )
+        return current_user
+    return role_checker
+
+def get_admin_user(current_user: models.User = Depends(get_current_user)):
+    if normalize_role(current_user.role) != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Admin privileges required"
         )
     return current_user
 
+def get_evaluator_assigned_section_names(evaluator_id: int, db: Session) -> list[str]:
+    mappings = db.query(models.EvaluatorSection).filter(models.EvaluatorSection.evaluator_id == evaluator_id).all()
+    section_ids = [m.section_id for m in mappings]
+    if not section_ids:
+        return []
+    sections = db.query(models.Section).filter(models.Section.id.in_(section_ids)).all()
+    return [s.name for s in sections]
 
-# --- Endpoints ---
+# --- Auth Endpoints ---
 
-@router.post("/signup", response_model=Token)
+RESEND_COOLDOWN_SECONDS = 60
+resend_cooldowns: dict[str, datetime] = {}
+
+@router.post("/signup")
 def signup(user: UserCreate, db: Session = Depends(get_db)):
-    db_user = db.query(models.User).filter(models.User.email == user.email).first()
-    if db_user:
+    name = (user.name or "").strip()
+    email = (user.email or "").strip().lower()
+    password = user.password or ""
+    confirm_password = (user.confirm_password or "").strip()
+    reg_number = (user.registration_number or "").strip().upper()
+
+    if not name or len(name) < 2:
+        raise HTTPException(status_code=400, detail="Full Name must be at least 2 characters long")
+
+    if not reg_number:
+        raise HTTPException(status_code=400, detail="Registration Number is required")
+
+    if not re.match(r'^[A-Za-z0-9\-_/]+$', reg_number):
+        raise HTTPException(status_code=400, detail="Registration Number can only contain letters, numbers, hyphens, and slashes")
+
+    if not email or not re.match(EMAIL_REGEX, email):
+        raise HTTPException(status_code=400, detail="Invalid email format")
+
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters long")
+
+    if not confirm_password:
+        raise HTTPException(status_code=400, detail="Confirm Password is required")
+
+    if user.confirm_password != password:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+
+    db_user_email = db.query(models.User).filter(models.User.email == email).first()
+    if db_user_email:
         raise HTTPException(status_code=400, detail="Email already registered")
-    
-    hashed_password = get_password_hash(user.password)
-    new_user = models.User(name=user.name, email=user.email, password_hash=hashed_password)
+
+    db_user_reg = db.query(models.User).filter(models.User.registration_number == reg_number).first()
+    if db_user_reg:
+        raise HTTPException(status_code=400, detail="Registration number already registered")
+
+    raw_token, token_hash, expires_at = generate_verification_token()
+    hashed_password = get_password_hash(password)
+
+    new_user = models.User(
+        name=name,
+        email=email,
+        password_hash=hashed_password,
+        role="student", # Force student role strictly!
+        registration_number=reg_number,
+        department=user.department or "Computer Science",
+        is_verified=False,
+        verification_token=token_hash,
+        verification_token_expires=expires_at
+    )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
-    
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": str(new_user.id)}, expires_delta=access_token_expires
-    )
-    return {"access_token": access_token, "token_type": "bearer", "role": new_user.role}
 
+    email_res = send_verification_email(new_user.email, new_user.name, raw_token)
+    sent = email_res.get("sent", False)
+
+    return {
+        "success": True,
+        "message": (
+            "Registration successful! A verification link has been sent to your email. Please verify your email to log in."
+            if sent else
+            f"Registration completed. {email_res.get('message', 'Please check your email.')}"
+        ),
+        "email": new_user.email,
+        "is_verified": False,
+        "email_sent": sent,
+        "smtp_configured": email_res.get("method") == "smtp" or sent,
+        "verification_url": email_res.get("verification_url")
+    }
+
+@router.post("/verify-email")
+def verify_email(data: VerifyEmailRequest, db: Session = Depends(get_db)):
+    if not data.token:
+        raise HTTPException(status_code=400, detail="Verification token is required")
+    token_hash = hash_token(data.token.strip())
+    user = db.query(models.User).filter(models.User.verification_token == token_hash).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid or already used verification token")
+    if user.verification_token_expires and user.verification_token_expires < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="Verification token has expired. Please request a new one.")
+    
+    user.is_verified = True
+    user.verification_token = None
+    user.verification_token_expires = None
+    db.commit()
+    return {"success": True, "message": "Email verified successfully! You can now log in."}
+
+@router.get("/verify-email")
+def verify_email_get(token: str = Query(...), db: Session = Depends(get_db)):
+    return verify_email(VerifyEmailRequest(token=token), db)
+
+@router.post("/resend-verification")
+def resend_verification(data: ResendVerificationRequest, db: Session = Depends(get_db)):
+    email = data.email.strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    now = datetime.utcnow()
+    if email in resend_cooldowns:
+        elapsed = (now - resend_cooldowns[email]).total_seconds()
+        if elapsed < RESEND_COOLDOWN_SECONDS:
+            remaining = int(RESEND_COOLDOWN_SECONDS - elapsed)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Please wait {remaining} seconds before requesting another verification email."
+            )
+
+    user = db.query(models.User).filter(models.User.email == email).first()
+    if not user:
+        return {"success": True, "message": "If this email is registered, a verification link has been sent."}
+    if user.is_verified:
+        return {"success": True, "message": "Account is already verified. You can log in directly."}
+    
+    raw_token, token_hash, expires_at = generate_verification_token()
+    user.verification_token = token_hash
+    user.verification_token_expires = expires_at
+    db.commit()
+
+    resend_cooldowns[email] = now
+    email_res = send_verification_email(user.email, user.name, raw_token)
+    sent = email_res.get("sent", False)
+    return {
+        "success": True,
+        "message": (
+            "Verification link has been resent to your email. Please check your inbox."
+            if sent else
+            f"Verification link generated. {email_res.get('message', 'Please check your email.')}"
+        ),
+        "email_sent": sent,
+        "smtp_configured": email_res.get("method") == "smtp" or sent,
+        "verification_url": email_res.get("verification_url")
+    }
+
+@router.get("/admin/smtp-status")
+def get_smtp_status(current_user: models.User = Depends(get_admin_user)):
+    is_valid, validation_msg = validate_smtp_config()
+    cfg = get_smtp_config()
+    if not is_valid:
+        return {
+            "configured": False,
+            "status": "Incomplete Configuration",
+            "message": validation_msg,
+            "host": cfg.get("host"),
+            "port": cfg.get("port"),
+            "username_set": bool(cfg.get("user")),
+            "password_set": bool(cfg.get("password")),
+            "from_email": cfg.get("from_email"),
+            "environment": cfg.get("environment")
+        }
+    
+    conn_ok, conn_msg = verify_smtp_connection()
+    return {
+        "configured": True,
+        "status": "Connected" if conn_ok else "Authentication/Connection Error",
+        "message": conn_msg,
+        "host": cfg.get("host"),
+        "port": cfg.get("port"),
+        "username_set": bool(cfg.get("user")),
+        "password_set": bool(cfg.get("password")),
+        "from_email": cfg.get("from_email"),
+        "environment": cfg.get("environment")
+    }
 
 @router.post("/login", response_model=Token)
 def login(user: UserLogin, db: Session = Depends(get_db)):
-    db_user = db.query(models.User).filter(models.User.email == user.email).first()
+    email = user.email.strip().lower()
+    db_user = db.query(models.User).filter(models.User.email == email).first()
     if not db_user or not verify_password(user.password, db_user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -146,11 +356,31 @@ def login(user: UserLogin, db: Session = Depends(get_db)):
             headers={"WWW-Authenticate": "Bearer"},
         )
         
+    if not db_user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please check your inbox or request a new verification link.",
+        )
+
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    user_role = normalize_role(db_user.role)
     access_token = create_access_token(
-        data={"sub": str(db_user.id)}, expires_delta=access_token_expires
+        data={"sub": str(db_user.id), "role": user_role}, expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer", "role": db_user.role}
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "role": user_role,
+        "user": {
+            "id": db_user.id,
+            "name": db_user.name,
+            "email": db_user.email,
+            "role": user_role,
+            "department": db_user.department,
+            "registration_number": db_user.registration_number
+        }
+    }
+
 
 
 @router.post("/upload")
@@ -329,12 +559,24 @@ async def upload_file(file: UploadFile = File(...), section_name: str = Form(Non
 @router.get("/uploads")
 def get_uploads(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     uploads = db.query(models.Upload).filter(models.Upload.user_id == current_user.id).order_by(models.Upload.upload_time.desc()).all()
-    # Format upload_time before sending out
     result = []
     for u in uploads:
-        d = u.__dict__
-        d['upload_time'] = u.upload_time.strftime("%d-%m-%Y | %I:%M %p IST") if u.upload_time else ""
-        result.append(d)
+        eval_record = db.query(models.Evaluation).filter(models.Evaluation.upload_id == u.id).first()
+        result.append({
+            "id": u.id,
+            "file_name": u.file_name,
+            "file_type": u.file_type,
+            "section_name": u.section_name or "N/A",
+            "assignment_title": u.assignment_title or "N/A",
+            "upload_time": u.upload_time.strftime("%d-%m-%Y | %I:%M %p IST") if u.upload_time else "",
+            "similarity_score": u.similarity_score or 0.0,
+            "duplicate_type": u.duplicate_type,
+            "evaluation_status": eval_record.status if eval_record else "Pending Review",
+            "marks": eval_record.marks if eval_record else None,
+            "max_marks": eval_record.max_marks if eval_record else 100.0,
+            "decision": eval_record.decision if eval_record else None,
+            "comments": eval_record.comments if eval_record else None
+        })
     return result
 
 @router.get("/duplicates")
@@ -478,50 +720,489 @@ def change_password(data: PasswordChange, current_user: models.User = Depends(ge
     return {"message": "Password updated successfully"}
 
 class ProfileUpdate(BaseModel):
-    email: str
+    name: Optional[str] = None
+    email: Optional[str] = None
+
+@router.get("/profile")
+def get_profile(current_user: models.User = Depends(get_current_user)):
+    return {
+        "id": current_user.id,
+        "name": current_user.name,
+        "email": current_user.email,
+        "role": normalize_role(current_user.role),
+        "registration_number": current_user.registration_number,
+        "department": current_user.department,
+        "is_verified": bool(current_user.is_verified)
+    }
 
 @router.put("/update-profile")
 def update_profile(data: ProfileUpdate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if data.email != current_user.email:
-        existing = db.query(models.User).filter(models.User.email == data.email).first()
-        if existing:
+    if data.name:
+        current_user.name = data.name.strip()
+    if data.email and data.email != current_user.email:
+        clean_email = data.email.strip().lower()
+        if not re.match(EMAIL_REGEX, clean_email):
+            raise HTTPException(status_code=400, detail="Invalid email format")
+        existing = db.query(models.User).filter(models.User.email == clean_email).first()
+        if existing and existing.id != current_user.id:
             raise HTTPException(status_code=400, detail="Email already taken")
-        current_user.email = data.email
-        db.commit()
-    return {"message": "Profile updated successfully"}
+        current_user.email = clean_email
+    db.commit()
+    db.refresh(current_user)
+    return {
+        "success": True, 
+        "message": "Profile updated successfully",
+        "user": {
+            "id": current_user.id,
+            "name": current_user.name,
+            "email": current_user.email,
+            "role": normalize_role(current_user.role),
+            "registration_number": current_user.registration_number,
+            "department": current_user.department,
+            "is_verified": bool(current_user.is_verified)
+        }
+    }
 
-# --- New Endpoints for Sections and Comparison ---
+# --- User & Role Management (Admin / HOD) ---
+
+@router.get("/admin/users")
+def get_users_list(current_user: models.User = Depends(require_roles("admin", "hod")), db: Session = Depends(get_db)):
+    query = db.query(models.User)
+    if normalize_role(current_user.role) == "hod":
+        dept = current_user.department or "Computer Science"
+        query = query.filter(models.User.department == dept)
+    users = query.all()
+    return [
+        {
+            "id": u.id,
+            "name": u.name,
+            "email": u.email,
+            "role": normalize_role(u.role),
+            "registration_number": u.registration_number,
+            "department": u.department or "Computer Science",
+            "is_verified": bool(u.is_verified)
+        }
+        for u in users
+    ]
+
+@router.put("/admin/users/{user_id}/role")
+def update_user_role(user_id: int, data: RoleUpdate, current_user: models.User = Depends(get_admin_user), db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    valid_roles = ["student", "evaluator", "hod", "admin"]
+    new_role = data.role.lower()
+    if new_role not in valid_roles:
+        raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of {valid_roles}")
+    
+    if user.id == current_user.id and new_role != "admin":
+        raise HTTPException(status_code=400, detail="Cannot demote your own admin account")
+
+    user.role = new_role
+    if data.department:
+        user.department = data.department.strip()
+    db.commit()
+    return {"success": True, "message": f"User role updated to {user.role}", "role": user.role}
+
+# --- Sections Management ---
 
 @router.get("/sections")
 def get_sections(db: Session = Depends(get_db)):
     return db.query(models.Section).all()
 
 @router.post("/sections")
-def create_section(section: SectionCreate, current_user: models.User = Depends(get_admin_user), db: Session = Depends(get_db)):
-    existing = db.query(models.Section).filter(models.Section.name == section.name).first()
+def create_section(section: SectionCreate, current_user: models.User = Depends(require_roles("admin", "hod")), db: Session = Depends(get_db)):
+    dept = current_user.department if normalize_role(current_user.role) == "hod" else (section.department or "Computer Science")
+    existing = db.query(models.Section).filter(models.Section.name == section.name.strip()).first()
     if existing:
         raise HTTPException(status_code=400, detail="Section already exists")
-    new_sec = models.Section(name=section.name)
+    new_sec = models.Section(name=section.name.strip(), department=dept)
     db.add(new_sec)
     db.commit()
     db.refresh(new_sec)
     return new_sec
 
 @router.delete("/sections/{section_id}")
-def delete_section(section_id: int, current_user: models.User = Depends(get_admin_user), db: Session = Depends(get_db)):
+def delete_section(section_id: int, current_user: models.User = Depends(require_roles("admin", "hod")), db: Session = Depends(get_db)):
     section = db.query(models.Section).filter(models.Section.id == section_id).first()
     if not section:
         raise HTTPException(status_code=404, detail="Section not found")
+    if normalize_role(current_user.role) == "hod" and section.department != current_user.department:
+        raise HTTPException(status_code=403, detail="Cannot delete section outside your department")
     db.delete(section)
     db.commit()
     return {"message": "Section deleted"}
 
+# --- Evaluator-to-Section Assignment Endpoints ---
+
+@router.get("/evaluators")
+def get_evaluators(current_user: models.User = Depends(require_roles("admin", "hod")), db: Session = Depends(get_db)):
+    query = db.query(models.User).filter(models.User.role.in_(["evaluator", "teacher"]))
+    if normalize_role(current_user.role) == "hod":
+        dept = current_user.department or "Computer Science"
+        query = query.filter(models.User.department == dept)
+    evaluators = query.all()
+    return [
+        {
+            "id": e.id,
+            "name": e.name,
+            "email": e.email,
+            "department": e.department or "Computer Science"
+        }
+        for e in evaluators
+    ]
+
+@router.get("/evaluator-sections")
+def get_evaluator_sections(current_user: models.User = Depends(require_roles("admin", "hod", "evaluator")), db: Session = Depends(get_db)):
+    user_role = normalize_role(current_user.role)
+    query = db.query(models.EvaluatorSection)
+    
+    if user_role == "evaluator":
+        query = query.filter(models.EvaluatorSection.evaluator_id == current_user.id)
+    elif user_role == "hod":
+        dept = current_user.department or "Computer Science"
+        section_ids = [s.id for s in db.query(models.Section).filter(models.Section.department == dept).all()]
+        query = query.filter(models.EvaluatorSection.section_id.in_(section_ids))
+        
+    mappings = query.all()
+    results = []
+    for m in mappings:
+        evaluator = db.query(models.User).filter(models.User.id == m.evaluator_id).first()
+        section = db.query(models.Section).filter(models.Section.id == m.section_id).first()
+        results.append({
+            "id": m.id,
+            "evaluator_id": m.evaluator_id,
+            "evaluator_name": evaluator.name if evaluator else "Unknown",
+            "evaluator_email": evaluator.email if evaluator else "",
+            "section_id": m.section_id,
+            "section_name": section.name if section else "Unknown",
+            "department": section.department if section else "General",
+            "assigned_at": m.assigned_at.strftime("%d-%m-%Y | %I:%M %p IST") if m.assigned_at else ""
+        })
+    return results
+
+@router.post("/evaluator-sections")
+def assign_evaluator_to_section(data: EvaluatorSectionCreate, current_user: models.User = Depends(require_roles("admin", "hod")), db: Session = Depends(get_db)):
+    evaluator = db.query(models.User).filter(models.User.id == data.evaluator_id).first()
+    if not evaluator:
+        raise HTTPException(status_code=404, detail="Evaluator user not found")
+    if normalize_role(evaluator.role) != "evaluator":
+        raise HTTPException(status_code=400, detail="Selected user is not an evaluator")
+        
+    section = db.query(models.Section).filter(models.Section.id == data.section_id).first()
+    if not section:
+        raise HTTPException(status_code=404, detail="Section not found")
+        
+    if normalize_role(current_user.role) == "hod":
+        if section.department != current_user.department:
+            raise HTTPException(status_code=403, detail="Cannot assign section outside your department")
+
+    existing = db.query(models.EvaluatorSection).filter(
+        models.EvaluatorSection.evaluator_id == data.evaluator_id,
+        models.EvaluatorSection.section_id == data.section_id
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Evaluator is already assigned to this section")
+
+    new_mapping = models.EvaluatorSection(
+        evaluator_id=data.evaluator_id,
+        section_id=data.section_id,
+        assigned_by_id=current_user.id
+    )
+    db.add(new_mapping)
+    db.commit()
+    db.refresh(new_mapping)
+    return {"success": True, "message": f"Assigned {evaluator.name} to section {section.name}"}
+
+@router.delete("/evaluator-sections/{evaluator_id}/{section_id}")
+def remove_evaluator_section(evaluator_id: int, section_id: int, current_user: models.User = Depends(require_roles("admin", "hod")), db: Session = Depends(get_db)):
+    mapping = db.query(models.EvaluatorSection).filter(
+        models.EvaluatorSection.evaluator_id == evaluator_id,
+        models.EvaluatorSection.section_id == section_id
+    ).first()
+    if not mapping:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    db.delete(mapping)
+    db.commit()
+    return {"success": True, "message": "Assignment removed successfully"}
+
+@router.get("/evaluator/sections")
+def get_evaluator_own_sections(current_user: models.User = Depends(require_roles("evaluator", "admin")), db: Session = Depends(get_db)):
+    user_role = normalize_role(current_user.role)
+    if user_role == "admin":
+        return db.query(models.Section).all()
+    assigned_section_names = get_evaluator_assigned_section_names(current_user.id, db)
+    return db.query(models.Section).filter(models.Section.name.in_(assigned_section_names)).all()
+
+@router.get("/evaluator/submissions")
+def get_evaluator_submissions(current_user: models.User = Depends(require_roles("evaluator", "admin")), db: Session = Depends(get_db)):
+    user_role = normalize_role(current_user.role)
+    if user_role == "admin":
+        uploads = db.query(models.Upload).order_by(models.Upload.upload_time.desc()).all()
+    else:
+        assigned_section_names = get_evaluator_assigned_section_names(current_user.id, db)
+        if not assigned_section_names:
+            return []
+        uploads = db.query(models.Upload).filter(models.Upload.section_name.in_(assigned_section_names)).order_by(models.Upload.upload_time.desc()).all()
+    
+    results = []
+    for u in uploads:
+        eval_record = db.query(models.Evaluation).filter(models.Evaluation.upload_id == u.id).first()
+        results.append({
+            "id": u.id,
+            "file_name": u.file_name,
+            "student_name": u.owner.name if u.owner else "Unknown",
+            "student_email": u.owner.email if u.owner else "",
+            "registration_number": u.owner.registration_number if u.owner else "N/A",
+            "section_name": u.section_name or "N/A",
+            "assignment_title": u.assignment_title or "N/A",
+            "upload_time": u.upload_time.strftime("%d-%m-%Y | %I:%M %p IST") if u.upload_time else "",
+            "similarity_score": u.similarity_score or 0.0,
+            "duplicate_type": u.duplicate_type,
+            "evaluation_status": eval_record.status if eval_record else "Ready for Review",
+            "marks": eval_record.marks if eval_record else None,
+            "max_marks": eval_record.max_marks if eval_record else 100.0,
+            "decision": eval_record.decision if eval_record else None,
+            "comments": eval_record.comments if eval_record else None
+        })
+    return results
+
+# --- HOD Department & Section Analytics ---
+
+@router.get("/hod/analytics")
+def get_hod_analytics(current_user: models.User = Depends(require_roles("hod", "admin")), db: Session = Depends(get_db)):
+    dept = current_user.department or "Computer Science"
+    user_role = normalize_role(current_user.role)
+    
+    if user_role == "admin":
+        sections = db.query(models.Section).all()
+        students_query = db.query(models.User).filter(models.User.role.in_(["student", "user"]))
+        evaluators_query = db.query(models.User).filter(models.User.role.in_(["evaluator", "teacher"]))
+    else:
+        sections = db.query(models.Section).filter(models.Section.department == dept).all()
+        students_query = db.query(models.User).filter(models.User.role.in_(["student", "user"]), models.User.department == dept)
+        evaluators_query = db.query(models.User).filter(models.User.role.in_(["evaluator", "teacher"]), models.User.department == dept)
+    
+    total_students = students_query.count()
+    total_evaluators = evaluators_query.count()
+    section_names = [s.name for s in sections]
+    
+    if user_role == "admin":
+        uploads = db.query(models.Upload).all()
+    else:
+        uploads = db.query(models.Upload).filter(models.Upload.section_name.in_(section_names)).all() if section_names else []
+        
+    total_submissions = len(uploads)
+    high_similarity_count = sum(1 for u in uploads if (u.similarity_score or 0.0) >= 90.0)
+    scores = [u.similarity_score for u in uploads if u.similarity_score is not None]
+    avg_similarity = round(sum(scores) / len(scores), 1) if scores else 0.0
+    
+    upload_ids = [u.id for u in uploads]
+    evaluations = db.query(models.Evaluation).filter(models.Evaluation.upload_id.in_(upload_ids)).all() if upload_ids else []
+    completed_evals = sum(1 for e in evaluations if e.status == "Evaluation Completed")
+    pending_evals = total_submissions - completed_evals
+    
+    section_stats = []
+    for s in sections:
+        sec_uploads = [u for u in uploads if u.section_name == s.name]
+        sec_upload_ids = [u.id for u in sec_uploads]
+        sec_evals = [e for e in evaluations if e.upload_id in sec_upload_ids]
+        sec_completed = sum(1 for e in sec_evals if e.status == "Evaluation Completed")
+        sec_scores = [u.similarity_score for u in sec_uploads if u.similarity_score is not None]
+        sec_avg_sim = round(sum(sec_scores) / len(sec_scores), 1) if sec_scores else 0.0
+        
+        section_stats.append({
+            "section_id": s.id,
+            "section_name": s.name,
+            "department": s.department,
+            "total_submissions": len(sec_uploads),
+            "completed_evaluations": sec_completed,
+            "pending_evaluations": len(sec_uploads) - sec_completed,
+            "average_similarity": sec_avg_sim
+        })
+        
+    evaluators = evaluators_query.all()
+    evaluator_workload = []
+    for ev in evaluators:
+        assigned_sec_names = get_evaluator_assigned_section_names(ev.id, db)
+        assigned_uploads = [u for u in uploads if u.section_name in assigned_sec_names]
+        assigned_upload_ids = [u.id for u in assigned_uploads]
+        ev_evals = [e for e in evaluations if e.upload_id in assigned_upload_ids and e.evaluator_id == ev.id and e.status == "Evaluation Completed"]
+        
+        evaluator_workload.append({
+            "evaluator_id": ev.id,
+            "evaluator_name": ev.name,
+            "evaluator_email": ev.email,
+            "assigned_sections": assigned_sec_names,
+            "total_submissions": len(assigned_uploads),
+            "completed": len(ev_evals),
+            "pending": len(assigned_uploads) - len(ev_evals)
+        })
+
+    return {
+        "department": dept,
+        "total_students": total_students,
+        "total_evaluators": total_evaluators,
+        "total_sections": len(sections),
+        "total_submissions": total_submissions,
+        "completed_evaluations": completed_evals,
+        "pending_evaluations": pending_evals,
+        "average_similarity": avg_similarity,
+        "high_similarity_count": high_similarity_count,
+        "section_stats": section_stats,
+        "evaluator_workload": evaluator_workload
+    }
+
+@router.get("/hod/submissions")
+def get_hod_submissions(current_user: models.User = Depends(require_roles("hod", "admin")), db: Session = Depends(get_db)):
+    dept = current_user.department or "Computer Science"
+    user_role = normalize_role(current_user.role)
+    
+    if user_role == "admin":
+        uploads = db.query(models.Upload).order_by(models.Upload.upload_time.desc()).all()
+    else:
+        sections = db.query(models.Section).filter(models.Section.department == dept).all()
+        section_names = [s.name for s in sections]
+        uploads = db.query(models.Upload).filter(models.Upload.section_name.in_(section_names)).order_by(models.Upload.upload_time.desc()).all() if section_names else []
+
+    results = []
+    for u in uploads:
+        eval_record = db.query(models.Evaluation).filter(models.Evaluation.upload_id == u.id).first()
+        results.append({
+            "id": u.id,
+            "file_name": u.file_name,
+            "student_name": u.owner.name if u.owner else "Unknown",
+            "student_email": u.owner.email if u.owner else "",
+            "registration_number": u.owner.registration_number if u.owner else "N/A",
+            "section_name": u.section_name or "N/A",
+            "assignment_title": u.assignment_title or "N/A",
+            "upload_time": u.upload_time.strftime("%d-%m-%Y | %I:%M %p IST") if u.upload_time else "",
+            "similarity_score": u.similarity_score or 0.0,
+            "duplicate_type": u.duplicate_type,
+            "evaluation_status": eval_record.status if eval_record else "Ready for Review",
+            "marks": eval_record.marks if eval_record else None,
+            "decision": eval_record.decision if eval_record else None
+        })
+    return results
+
+# --- Academic Evaluation Workflow Endpoints ---
+
+@router.get("/evaluations/{upload_id}")
+def get_evaluation(upload_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    upload = db.query(models.Upload).filter(models.Upload.id == upload_id).first()
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+        
+    user_role = normalize_role(current_user.role)
+    if user_role == "student" and upload.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    elif user_role == "evaluator":
+        assigned = get_evaluator_assigned_section_names(current_user.id, db)
+        if upload.section_name not in assigned:
+            raise HTTPException(status_code=403, detail="Access denied: upload not in your assigned sections")
+            
+    eval_record = db.query(models.Evaluation).filter(models.Evaluation.upload_id == upload_id).first()
+    if not eval_record:
+        return {
+            "upload_id": upload_id,
+            "status": "Ready for Review",
+            "marks": None,
+            "max_marks": 100.0,
+            "decision": None,
+            "comments": None,
+            "evaluator_name": None,
+            "updated_at": None
+        }
+        
+    evaluator = db.query(models.User).filter(models.User.id == eval_record.evaluator_id).first() if eval_record.evaluator_id else None
+    return {
+        "upload_id": upload_id,
+        "status": eval_record.status,
+        "marks": eval_record.marks,
+        "max_marks": eval_record.max_marks,
+        "decision": eval_record.decision,
+        "comments": eval_record.comments,
+        "evaluator_name": evaluator.name if evaluator else "Staff Evaluator",
+        "updated_at": eval_record.updated_at.strftime("%d-%m-%Y | %I:%M %p IST") if eval_record.updated_at else ""
+    }
+
+@router.post("/evaluations/{upload_id}")
+def submit_evaluation(upload_id: int, data: EvaluationSubmit, current_user: models.User = Depends(require_roles("evaluator", "hod", "admin")), db: Session = Depends(get_db)):
+    upload = db.query(models.Upload).filter(models.Upload.id == upload_id).first()
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+        
+    user_role = normalize_role(current_user.role)
+    if user_role == "evaluator":
+        assigned = get_evaluator_assigned_section_names(current_user.id, db)
+        if upload.section_name not in assigned:
+            raise HTTPException(status_code=403, detail="Access denied: upload not in your assigned sections")
+    elif user_role == "hod":
+        sec = db.query(models.Section).filter(models.Section.name == upload.section_name).first()
+        if sec and sec.department and current_user.department and sec.department != current_user.department:
+            raise HTTPException(status_code=403, detail="Access denied: upload outside your department")
+
+    if data.marks is not None:
+        max_m = data.max_marks if data.max_marks is not None else 100.0
+        if data.marks < 0 or data.marks > max_m:
+            raise HTTPException(status_code=400, detail=f"Marks must be between 0 and {max_m}")
+
+    eval_record = db.query(models.Evaluation).filter(models.Evaluation.upload_id == upload_id).first()
+    if not eval_record:
+        eval_record = models.Evaluation(
+            upload_id=upload_id,
+            evaluator_id=current_user.id,
+            marks=data.marks,
+            max_marks=data.max_marks or 100.0,
+            status=data.status,
+            decision=data.decision,
+            comments=data.comments
+        )
+        db.add(eval_record)
+    else:
+        eval_record.evaluator_id = current_user.id
+        if data.marks is not None:
+            eval_record.marks = data.marks
+        if data.max_marks is not None:
+            eval_record.max_marks = data.max_marks
+        eval_record.status = data.status
+        eval_record.decision = data.decision
+        eval_record.comments = data.comments
+        eval_record.updated_at = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+        
+    db.commit()
+    db.refresh(eval_record)
+    return {
+        "success": True,
+        "message": "Evaluation saved successfully",
+        "evaluation": {
+            "upload_id": upload_id,
+            "status": eval_record.status,
+            "marks": eval_record.marks,
+            "max_marks": eval_record.max_marks,
+            "decision": eval_record.decision,
+            "comments": eval_record.comments
+        }
+    }
+
+# --- Comparison & Highlights with Scoped Authorization ---
+
 @router.get("/compare/{upload_id}")
-def compare_uploads(upload_id: int, current_user: models.User = Depends(get_admin_user), db: Session = Depends(get_db)):
+def compare_uploads(upload_id: int, current_user: models.User = Depends(require_roles("admin", "hod", "evaluator")), db: Session = Depends(get_db)):
     upload = db.query(models.Upload).filter(models.Upload.id == upload_id).first()
     if not upload:
         raise HTTPException(status_code=404, detail="Upload not found")
     
+    user_role = normalize_role(current_user.role)
+    if user_role == "evaluator":
+        assigned_sections = get_evaluator_assigned_section_names(current_user.id, db)
+        if upload.section_name not in assigned_sections:
+            raise HTTPException(status_code=403, detail="Access denied: upload does not belong to your assigned sections")
+    elif user_role == "hod":
+        sec = db.query(models.Section).filter(models.Section.name == upload.section_name).first()
+        if sec and sec.department and current_user.department and sec.department != current_user.department:
+            raise HTTPException(status_code=403, detail="Access denied: upload is outside your department")
+
     # Attempt to find the matched upload's content
     matched_upload = None
     
@@ -581,13 +1262,23 @@ def compare_uploads(upload_id: int, current_user: models.User = Depends(get_admi
     }
 
 @router.get("/admin/download/highlighted/{upload_id}")
-def download_highlighted_pdf(upload_id: int, type: str = "uploaded", current_user: models.User = Depends(get_admin_user), db: Session = Depends(get_db)):
+def download_highlighted_pdf(upload_id: int, type: str = "uploaded", current_user: models.User = Depends(require_roles("admin", "hod", "evaluator")), db: Session = Depends(get_db)):
     import fitz
     from fastapi.responses import Response
 
     upload = db.query(models.Upload).filter(models.Upload.id == upload_id).first()
     if not upload:
         raise HTTPException(status_code=404, detail="Upload not found")
+
+    user_role = normalize_role(current_user.role)
+    if user_role == "evaluator":
+        assigned_sections = get_evaluator_assigned_section_names(current_user.id, db)
+        if upload.section_name not in assigned_sections:
+            raise HTTPException(status_code=403, detail="Access denied: upload does not belong to your assigned sections")
+    elif user_role == "hod":
+        sec = db.query(models.Section).filter(models.Section.name == upload.section_name).first()
+        if sec and sec.department and current_user.department and sec.department != current_user.department:
+            raise HTTPException(status_code=403, detail="Access denied: upload is outside your department")
 
     matched_upload = None
     if upload.metadata_json and upload.metadata_json.get("matched_upload_id"):
@@ -625,14 +1316,12 @@ def download_highlighted_pdf(upload_id: int, type: str = "uploaded", current_use
             
             for h in highlights:
                 if h["color"] in ["red", "yellow", "orange"]:
-                    # Search text handling newlines and spaces loosely
                     text_to_search = h["text"].replace('\n', ' ').strip()
                     if len(text_to_search) < 5:
-                        continue # too short to highlight safely
+                        continue
                         
                     insts = page.search_for(text_to_search)
                     
-                    # Fallback for line breaks
                     if not insts and len(text_to_search) > 30:
                         words = text_to_search.split()
                         if len(words) > 6:
@@ -644,10 +1333,8 @@ def download_highlighted_pdf(upload_id: int, type: str = "uploaded", current_use
                     if insts:
                         rects_to_highlight[h["color"]].extend(insts)
             
-            # Apply merged highlights
             for color, rects in rects_to_highlight.items():
                 if not rects: continue
-                # In PyMuPDF, add_highlight_annot takes a list of quads/rects and merges them implicitly
                 annot = page.add_highlight_annot(rects)
                 if annot:
                     if color == "red":
@@ -671,10 +1358,17 @@ def download_highlighted_pdf(upload_id: int, type: str = "uploaded", current_use
         raise HTTPException(status_code=500, detail=f"Failed to highlight PDF: {e}")
 
 @router.get("/admin/uploads")
-def get_all_uploads(current_user: models.User = Depends(get_admin_user), db: Session = Depends(get_db)):
-    uploads_with_users = db.query(models.Upload, models.User).join(
+def get_all_uploads(current_user: models.User = Depends(require_roles("admin", "hod")), db: Session = Depends(get_db)):
+    query = db.query(models.Upload, models.User).join(
         models.User, models.Upload.user_id == models.User.id
-    ).order_by(models.Upload.upload_time.desc()).all()
+    )
+    if normalize_role(current_user.role) == "hod":
+        dept = current_user.department or "Computer Science"
+        sections = db.query(models.Section).filter(models.Section.department == dept).all()
+        sec_names = [s.name for s in sections]
+        query = query.filter(models.Upload.section_name.in_(sec_names))
+
+    uploads_with_users = query.order_by(models.Upload.upload_time.desc()).all()
 
     results = []
     for upload, user in uploads_with_users:
@@ -684,6 +1378,7 @@ def get_all_uploads(current_user: models.User = Depends(get_admin_user), db: Ses
             "file_type": upload.file_type,
             "uploaded_by_name": user.name,
             "uploaded_by_email": user.email,
+            "registration_number": user.registration_number or "N/A",
             "upload_time": upload.upload_time.strftime("%d-%m-%Y | %I:%M %p IST") if upload.upload_time else "",
             "section_name": upload.section_name or "No Section",
             "assignment_title": upload.assignment_title or "No Title",
@@ -697,11 +1392,23 @@ def get_all_uploads(current_user: models.User = Depends(get_admin_user), db: Ses
 from fastapi.responses import FileResponse
 
 @router.get("/admin/download/{upload_id}")
-def download_upload(upload_id: int, current_user: models.User = Depends(get_admin_user), db: Session = Depends(get_db)):
+def download_upload(upload_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     upload = db.query(models.Upload).filter(models.Upload.id == upload_id).first()
     if not upload or not upload.file_path:
         raise HTTPException(status_code=404, detail="File not found")
-        
+
+    user_role = normalize_role(current_user.role)
+    if user_role == "student" and upload.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied: cannot download other students' documents")
+    elif user_role == "evaluator":
+        assigned = get_evaluator_assigned_section_names(current_user.id, db)
+        if upload.section_name not in assigned:
+            raise HTTPException(status_code=403, detail="Access denied: document not in your assigned sections")
+    elif user_role == "hod":
+        sec = db.query(models.Section).filter(models.Section.name == upload.section_name).first()
+        if sec and sec.department and current_user.department and sec.department != current_user.department:
+            raise HTTPException(status_code=403, detail="Access denied: document is outside your department")
+
     if not os.path.exists(upload.file_path):
         raise HTTPException(status_code=404, detail="Original file missing from disk")
         
@@ -723,7 +1430,6 @@ def reprocess_uploads(current_user: models.User = Depends(get_admin_user), db: S
             upload.extracted_text = original_text
             upload.cleaned_text = cleaned_text
             
-            # ensure metadata_json is dict before updating
             if not isinstance(upload.metadata_json, dict):
                 upload.metadata_json = {}
                 
@@ -732,7 +1438,6 @@ def reprocess_uploads(current_user: models.User = Depends(get_admin_user), db: S
             metadata["pages_text"] = pages_text
             upload.metadata_json = metadata
             
-            # Regenerate embedding
             text_content = cleaned_text if cleaned_text else ""
             if not text_content and "text" in upload.file_type:
                 try:
@@ -750,3 +1455,4 @@ def reprocess_uploads(current_user: models.User = Depends(get_admin_user), db: S
         
     db.commit()
     return {"message": f"Successfully reprocessed {processed_count} uploads."}
+

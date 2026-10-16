@@ -8,7 +8,18 @@ export default function DuplicateCompareModal({ uploadId, onClose }: { uploadId:
   const [uploadedPdfUrl, setUploadedPdfUrl] = useState<string | null>(null);
   const [matchedPdfUrl, setMatchedPdfUrl] = useState<string | null>(null);
 
+  // Evaluation workflow state
+  const [userRole, setUserRole] = useState<string | null>(null);
+  const [evalMarks, setEvalMarks] = useState<string>('');
+  const [evalStatus, setEvalStatus] = useState<string>('Evaluation Completed');
+  const [evalDecision, setEvalDecision] = useState<string>('Cleared');
+  const [evalComments, setEvalComments] = useState<string>('');
+  const [evalSaving, setEvalSaving] = useState(false);
+  const [evalSaved, setEvalSaved] = useState(false);
+
   useEffect(() => {
+    setUserRole(localStorage.getItem('role'));
+
     const fetchComparison = async () => {
       try {
         const res = await api.get(`/compare/${uploadId}`);
@@ -19,8 +30,45 @@ export default function DuplicateCompareModal({ uploadId, onClose }: { uploadId:
         setLoading(false);
       }
     };
+
+    const fetchEvaluation = async () => {
+      try {
+        const res = await api.get(`/evaluations/${uploadId}`);
+        if (res.data) {
+          if (res.data.marks !== null && res.data.marks !== undefined) setEvalMarks(String(res.data.marks));
+          if (res.data.status) setEvalStatus(res.data.status);
+          if (res.data.decision) setEvalDecision(res.data.decision);
+          if (res.data.comments) setEvalComments(res.data.comments);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    };
+
     fetchComparison();
+    fetchEvaluation();
   }, [uploadId]);
+
+  const handleSaveEvaluation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setEvalSaving(true);
+    setEvalSaved(false);
+    try {
+      await api.post(`/evaluations/${uploadId}`, {
+        marks: evalMarks ? parseFloat(evalMarks) : null,
+        max_marks: 100.0,
+        status: evalStatus,
+        decision: evalDecision,
+        comments: evalComments
+      });
+      setEvalSaved(true);
+      setTimeout(() => setEvalSaved(false), 2500);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || "Failed to save evaluation.");
+    } finally {
+      setEvalSaving(false);
+    }
+  };
 
   useEffect(() => {
     if (data?.uploaded_document?.file_name?.toLowerCase().endsWith('.pdf') || data?.uploaded_file?.toLowerCase().endsWith('.pdf')) {
@@ -141,6 +189,79 @@ export default function DuplicateCompareModal({ uploadId, onClose }: { uploadId:
                         </div>
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {/* Academic Evaluation Section (for Evaluator / HOD / Admin) */}
+                {(userRole === 'evaluator' || userRole === 'hod' || userRole === 'admin') && (
+                  <div className="space-y-3 pt-3 border-t border-white/10">
+                    <h3 className="text-sm font-semibold uppercase text-emerald-400 border-b border-white/10 pb-1 flex items-center justify-between">
+                      <span>Academic Evaluation</span>
+                      {evalSaved && <span className="text-xs text-emerald-400 lowercase font-normal flex items-center"><CheckCircle className="w-3 h-3 mr-1" /> saved</span>}
+                    </h3>
+
+                    <form onSubmit={handleSaveEvaluation} className="space-y-2.5 text-xs">
+                      <div>
+                        <label className="text-gray-400 block mb-1">Marks (out of 100)</label>
+                        <input
+                          type="number"
+                          step="0.5"
+                          min="0"
+                          max="100"
+                          placeholder="e.g. 85"
+                          className="w-full px-2.5 py-1.5 bg-black/50 border border-white/10 rounded text-white focus:border-primary outline-none"
+                          value={evalMarks}
+                          onChange={(e) => setEvalMarks(e.target.value)}
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-gray-400 block mb-1">Status</label>
+                        <select
+                          className="w-full px-2.5 py-1.5 bg-black/50 border border-white/10 rounded text-white focus:border-primary outline-none"
+                          value={evalStatus}
+                          onChange={(e) => setEvalStatus(e.target.value)}
+                        >
+                          <option value="Ready for Review">Ready for Review</option>
+                          <option value="Under Review">Under Review</option>
+                          <option value="Evaluation Completed">Evaluation Completed</option>
+                          <option value="Requires Further Review">Requires Further Review</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="text-gray-400 block mb-1">Decision</label>
+                        <select
+                          className="w-full px-2.5 py-1.5 bg-black/50 border border-white/10 rounded text-white focus:border-primary outline-none"
+                          value={evalDecision}
+                          onChange={(e) => setEvalDecision(e.target.value)}
+                        >
+                          <option value="Cleared">Cleared (Original)</option>
+                          <option value="Needs Revision">Needs Revision</option>
+                          <option value="Academic Overlap Flagged">Academic Overlap Flagged</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="text-gray-400 block mb-1">Comments / Feedback</label>
+                        <textarea
+                          rows={2}
+                          placeholder="Feedback for student..."
+                          className="w-full px-2.5 py-1.5 bg-black/50 border border-white/10 rounded text-white focus:border-primary outline-none resize-none"
+                          value={evalComments}
+                          onChange={(e) => setEvalComments(e.target.value)}
+                        />
+                      </div>
+
+                      <button
+                        type="submit"
+                        disabled={evalSaving}
+                        className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-semibold transition-colors flex items-center justify-center shadow"
+                      >
+                        {evalSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <CheckCircle className="w-3.5 h-3.5 mr-1" />}
+                        Save Evaluation
+                      </button>
+                    </form>
                   </div>
                 )}
 

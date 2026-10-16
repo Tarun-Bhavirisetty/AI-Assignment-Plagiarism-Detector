@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON, Boolean, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone, timedelta
 from database import Base
@@ -10,16 +10,55 @@ class User(Base):
     name = Column(String, index=True)
     email = Column(String, unique=True, index=True)
     password_hash = Column(String)
-    role = Column(String, default="user")
+    role = Column(String, default="student") # student (or legacy 'user'), evaluator, hod, admin
+    registration_number = Column(String, unique=True, index=True, nullable=True)
+    department = Column(String, default="Computer Science")
+    is_verified = Column(Boolean, default=False)
+    verification_token = Column(String, nullable=True, index=True)
+    verification_token_expires = Column(DateTime, nullable=True)
     
     uploads = relationship("Upload", back_populates="owner")
-
+    assigned_sections = relationship("EvaluatorSection", foreign_keys="EvaluatorSection.evaluator_id", back_populates="evaluator")
 
 class Section(Base):
     __tablename__ = "sections"
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
+    department = Column(String, default="Computer Science")
+
+    evaluators = relationship("EvaluatorSection", back_populates="section", cascade="all, delete-orphan")
+
+class EvaluatorSection(Base):
+    __tablename__ = "evaluator_sections"
+    __table_args__ = (UniqueConstraint('evaluator_id', 'section_id', name='_evaluator_section_uc'),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    evaluator_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    section_id = Column(Integer, ForeignKey("sections.id", ondelete="CASCADE"), index=True)
+    assigned_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    assigned_at = Column(DateTime, default=lambda: datetime.now(timezone(timedelta(hours=5, minutes=30))))
+
+    evaluator = relationship("User", foreign_keys=[evaluator_id], back_populates="assigned_sections")
+    section = relationship("Section", back_populates="evaluators")
+    assigned_by = relationship("User", foreign_keys=[assigned_by_id])
+
+class Evaluation(Base):
+    __tablename__ = "evaluations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    upload_id = Column(Integer, ForeignKey("uploads.id", ondelete="CASCADE"), unique=True, index=True)
+    evaluator_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=True)
+    marks = Column(Float, nullable=True)
+    max_marks = Column(Float, default=100.0)
+    status = Column(String, default="Submitted") # Submitted, Ready for Review, Under Review, Evaluation Completed, Requires Further Review
+    decision = Column(String, nullable=True) # Cleared, Needs Revision, Academic Overlap Flagged
+    comments = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone(timedelta(hours=5, minutes=30))))
+    updated_at = Column(DateTime, onupdate=lambda: datetime.now(timezone(timedelta(hours=5, minutes=30))))
+
+    upload = relationship("Upload", backref="evaluation_record")
+    evaluator = relationship("User", foreign_keys=[evaluator_id])
 
 
 

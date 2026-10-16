@@ -39,10 +39,20 @@ export default function Navbar() {
                   <Link href="/dashboard" className="text-muted-foreground hover:text-white transition-colors">Admin Dashboard</Link>
                   <Link href="/settings" className="text-muted-foreground hover:text-white transition-colors">Settings</Link>
                 </>
+              ) : role === 'hod' ? (
+                <>
+                  <Link href="/hod-dashboard" className="text-muted-foreground hover:text-white transition-colors">HOD Dashboard</Link>
+                  <Link href="/settings" className="text-muted-foreground hover:text-white transition-colors">Settings</Link>
+                </>
+              ) : role === 'evaluator' ? (
+                <>
+                  <Link href="/evaluator-dashboard" className="text-muted-foreground hover:text-white transition-colors">Evaluator Dashboard</Link>
+                  <Link href="/settings" className="text-muted-foreground hover:text-white transition-colors">Settings</Link>
+                </>
               ) : (
                 <>
                   <Link href="/user-dashboard" className="text-muted-foreground hover:text-white transition-colors">My Dashboard</Link>
-                  <Link href="/upload" className="text-muted-foreground hover:text-white transition-colors">Upload</Link>
+                  <Link href="/upload" className="text-muted-foreground hover:text-white transition-colors">Upload Assignment</Link>
                   <Link href="/settings" className="text-muted-foreground hover:text-white transition-colors">Settings</Link>
                 </>
               )}
