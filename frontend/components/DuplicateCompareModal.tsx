@@ -7,6 +7,8 @@ export default function DuplicateCompareModal({ uploadId, onClose }: { uploadId:
   const [loading, setLoading] = useState(true);
   const [uploadedPdfUrl, setUploadedPdfUrl] = useState<string | null>(null);
   const [matchedPdfUrl, setMatchedPdfUrl] = useState<string | null>(null);
+  // Track which uploadId the current PDF URLs belong to, to detect stale state
+  const [pdfUploadId, setPdfUploadId] = useState<number | null>(null);
 
   // Evaluation workflow state
   const [userRole, setUserRole] = useState<string | null>(null);
@@ -18,6 +20,12 @@ export default function DuplicateCompareModal({ uploadId, onClose }: { uploadId:
   const [evalSaved, setEvalSaved] = useState(false);
 
   useEffect(() => {
+    // Reset all state when the upload changes to prevent stale data bleed-over
+    setData(null);
+    setLoading(true);
+    setUploadedPdfUrl(null);
+    setMatchedPdfUrl(null);
+    setPdfUploadId(null);
     setUserRole(localStorage.getItem('role'));
 
     const fetchComparison = async () => {
@@ -71,20 +79,29 @@ export default function DuplicateCompareModal({ uploadId, onClose }: { uploadId:
   };
 
   useEffect(() => {
-    if (data?.uploaded_document?.file_name?.toLowerCase().endsWith('.pdf') || data?.uploaded_file?.toLowerCase().endsWith('.pdf')) {
+    if (!data) return;
+    // Only fetch PDFs if we don't already have them for this uploadId
+    if (pdfUploadId === uploadId) return;
+
+    const isPdf =
+      data?.uploaded_document?.file_name?.toLowerCase().endsWith('.pdf') ||
+      data?.uploaded_file?.toLowerCase().endsWith('.pdf');
+
+    if (isPdf) {
       api.get(`/admin/download/highlighted/${uploadId}?type=uploaded`, { responseType: 'blob' })
         .then(res => setUploadedPdfUrl(URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }))))
         .catch(err => console.error("Failed PDF Load", err));
-        
-      if (data.reference_upload_id) {
+
+      if (data.reference_upload_id && data.reference_document?.file_name) {
         api.get(`/admin/download/highlighted/${uploadId}?type=matched`, { responseType: 'blob' })
           .then(res => setMatchedPdfUrl(URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }))))
           .catch(err => console.error("Failed Matched PDF Load", err));
       } else {
         setMatchedPdfUrl("missing");
       }
+      setPdfUploadId(uploadId);
     }
-  }, [data, uploadId]);
+  }, [data, uploadId, pdfUploadId]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
@@ -114,13 +131,27 @@ export default function DuplicateCompareModal({ uploadId, onClose }: { uploadId:
                 {/* Overall Similarity */}
                 <div className="text-center p-4 bg-white/5 rounded-xl border border-white/10">
                   <p className="text-sm text-muted-foreground uppercase font-semibold mb-2">Overall Similarity</p>
-                  <p className={`font-bold text-5xl ${data.overall_similarity >= 90 ? 'text-red-400' : 'text-yellow-400'}`}>
-                    {data.overall_similarity?.toFixed(0) || 0}%
+                  <p className={`font-bold text-5xl ${
+                    Number(data.overall_similarity) >= 90 ? 'text-red-400' :
+                    Number(data.overall_similarity) >= 60 ? 'text-yellow-400' :
+                    Number(data.overall_similarity) >= 20 ? 'text-orange-400' :
+                    'text-emerald-400'
+                  }`}>
+                    {Number(data.overall_similarity).toFixed(0)}%
                   </p>
+                  {data.detection_method && (
+                    <p className="text-xs text-gray-500 mt-1 uppercase tracking-wide">
+                      {data.detection_method === 'exact_hash' ? '🔒 Binary Exact Match' :
+                       data.detection_method === 'exact_content' ? '📄 Content Exact Match' :
+                       data.detection_method === 'hybrid_st_tfidf' ? '🧠 Semantic + Lexical' :
+                       data.detection_method === 'fallback_tfidf' ? '📝 Lexical Only' :
+                       data.detection_method === 'unavailable' ? '⚠ Analysis Unavailable' : ''}
+                    </p>
+                  )}
                 </div>
 
                 {/* Similarity Breakdown */}
-                {data.breakdown && (
+                {data.breakdown && Object.keys(data.breakdown).length > 0 && (
                   <div className="space-y-3">
                     <h3 className="text-sm font-semibold uppercase text-muted-foreground border-b border-white/10 pb-1">Similarity Breakdown</h3>
                     {Object.entries(data.breakdown).map(([key, val]: any) => (
@@ -135,7 +166,7 @@ export default function DuplicateCompareModal({ uploadId, onClose }: { uploadId:
                 )}
 
                 {/* Match Statistics */}
-                {data.match_statistics && (
+                {data.match_statistics && Object.keys(data.match_statistics).length > 0 && (
                   <div className="space-y-3">
                     <h3 className="text-sm font-semibold uppercase text-muted-foreground border-b border-white/10 pb-1">Evidence</h3>
                     {Object.entries(data.match_statistics).map(([key, val]: any) => {
@@ -157,17 +188,26 @@ export default function DuplicateCompareModal({ uploadId, onClose }: { uploadId:
                 {/* AI Summary */}
                 {data.ai_summary && (
                   <div className="space-y-3">
-                    <h3 className="text-sm font-semibold uppercase text-muted-foreground border-b border-white/10 pb-1">AI Plagiarism Summary</h3>
+                    <h3 className="text-sm font-semibold uppercase text-muted-foreground border-b border-white/10 pb-1">Analysis Summary</h3>
                     <p className="text-xs text-gray-300 leading-relaxed border border-white/10 p-3 rounded-lg bg-black/20">
-                      {data.overall_similarity >= 90 ? 
-                        "Very high textual similarity was detected between the two submissions. The normalized document content significantly matches the reference submission." :
-                        data.overall_similarity >= 50 ?
-                        "Moderate textual similarity was detected, indicating potential paraphrasing or shared source material." :
-                        "Low similarity detected. The documents appear largely independent."
+                      {/* Derive summary text from ACTUAL backend data, not hardcoded thresholds */}
+                      {data.detection_method === 'exact_hash'
+                        ? 'Binary-identical files detected. Both submissions are byte-for-byte copies of the same document.'
+                        : data.detection_method === 'exact_content'
+                        ? 'Normalized content is identical. The documents contain the same text, possibly from different exports or formatting.'
+                        : data.detection_method === 'unavailable'
+                        ? 'Comparison could not be completed. Reference document text is unavailable.'
+                        : Number(data.overall_similarity) >= 90
+                        ? `Very high textual similarity detected (${Number(data.overall_similarity).toFixed(0)}%). The submission closely matches the reference document across sentences, paragraphs, and content.`
+                        : Number(data.overall_similarity) >= 60
+                        ? `Significant similarity detected (${Number(data.overall_similarity).toFixed(0)}%). Substantial portions of the submission match or paraphrase the reference document.`
+                        : Number(data.overall_similarity) >= 30
+                        ? `Moderate similarity detected (${Number(data.overall_similarity).toFixed(0)}%). Some sections overlap with the reference document.`
+                        : `Low similarity detected (${Number(data.overall_similarity).toFixed(0)}%). The documents appear largely independent.`
                       }
                     </p>
-                    {data.ai_summary.copied?.length > 0 && <p className="text-xs text-red-400">Copied Sections: {data.ai_summary.copied.join(", ")}</p>}
-                    {data.ai_summary.similar?.length > 0 && <p className="text-xs text-yellow-400">Similar Sections: {data.ai_summary.similar.join(", ")}</p>}
+                    {data.ai_summary.copied?.length > 0 && <p className="text-xs text-red-400">High Similarity Sections: {data.ai_summary.copied.join(", ")}</p>}
+                    {data.ai_summary.similar?.length > 0 && <p className="text-xs text-yellow-400">Potential Overlap: {data.ai_summary.similar.join(", ")}</p>}
                   </div>
                 )}
 
@@ -281,32 +321,52 @@ export default function DuplicateCompareModal({ uploadId, onClose }: { uploadId:
               <div className="flex-1 flex flex-col md:flex-row bg-black/20">
                 {/* Reference PDF */}
                 <div className="flex-1 border-r border-white/10 flex flex-col">
-                  <div className="px-4 py-3 border-b border-white/10 bg-black/40 text-sm flex justify-between items-center">
+                <div className="px-4 py-3 border-b border-white/10 bg-black/40 text-sm flex justify-between items-center">
                     <div>
                       <span className="text-muted-foreground">Reference Match: </span>
-                      <span className="font-semibold text-blue-400">{data.reference_document?.matched_student || data.matched_student || "Unknown"}</span>
+                      {data.reference_document?.matched_student ? (
+                        <span className="font-semibold text-blue-400">{data.reference_document.matched_student}</span>
+                      ) : (
+                        <span className="font-semibold text-gray-500 italic">No Match Found</span>
+                      )}
                     </div>
                   </div>
                   <div className="flex-1 p-4">
                     {data.uploaded_document?.file_name?.toLowerCase().endsWith('.pdf') || data.uploaded_file?.toLowerCase().endsWith('.pdf') ? (
-                      matchedPdfUrl === "missing" ? (
+                      !data.reference_upload_id || !data.reference_document?.file_name ? (
+                        <div className="flex flex-col h-full items-center justify-center text-gray-400 space-y-2">
+                          <AlertTriangle className="w-10 h-10 text-yellow-600/60" />
+                          <p className="text-sm font-medium">No Reference Document Found</p>
+                          <p className="text-xs text-gray-500 text-center max-w-xs">
+                            This submission was not matched to any reference document during upload.
+                            The similarity score shown is from the original detection analysis.
+                          </p>
+                        </div>
+                      ) : matchedPdfUrl === "missing" ? (
                         <div className="flex h-full items-center justify-center text-red-400">Reference Document Unavailable</div>
                       ) : matchedPdfUrl ? (
                         <iframe src={matchedPdfUrl} className="w-full h-full rounded-xl border-none bg-white" />
                       ) : (
-                        <div className="flex h-full items-center justify-center text-muted-foreground"><Loader2 className="w-6 h-6 animate-spin mr-2"/> Loading PDF...</div>
+                        <div className="flex h-full items-center justify-center text-muted-foreground"><Loader2 className="w-6 h-6 animate-spin mr-2"/>Loading PDF...</div>
                       )
                     ) : (
-                      <div className="bg-blue-500/10 border border-blue-500/30 p-6 rounded-xl h-full overflow-y-auto text-sm leading-relaxed text-blue-100 whitespace-pre-wrap">
-                        {data.matched_highlighted?.map((chunk: any, i: number) => (
-                          <span key={i} className={`mr-1 px-1 rounded transition-colors ${
-                            chunk.color === 'red' ? 'bg-red-500/40 text-red-100 font-medium' :
-                            chunk.color === 'yellow' ? 'bg-yellow-500/40 text-yellow-100' :
-                            chunk.color === 'orange' ? 'bg-orange-500/40 text-orange-100' :
-                            'bg-transparent'
-                          }`}>{chunk.text}</span>
-                        ))}
-                      </div>
+                      !data.reference_document?.file_name ? (
+                        <div className="flex flex-col h-full items-center justify-center text-gray-400 space-y-2">
+                          <AlertTriangle className="w-10 h-10 text-yellow-600/60" />
+                          <p className="text-sm font-medium">No Reference Document Found</p>
+                        </div>
+                      ) : (
+                        <div className="bg-blue-500/10 border border-blue-500/30 p-6 rounded-xl h-full overflow-y-auto text-sm leading-relaxed text-blue-100 whitespace-pre-wrap">
+                          {data.matched_highlighted?.map((chunk: any, i: number) => (
+                            <span key={i} className={`mr-1 px-1 rounded transition-colors ${
+                              chunk.color === 'red' ? 'bg-red-500/40 text-red-100 font-medium' :
+                              chunk.color === 'yellow' ? 'bg-yellow-500/40 text-yellow-100' :
+                              chunk.color === 'orange' ? 'bg-orange-500/40 text-orange-100' :
+                              'bg-transparent'
+                            }`}>{chunk.text}</span>
+                          ))}
+                        </div>
+                      )
                     )}
                   </div>
                 </div>

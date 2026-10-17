@@ -1203,33 +1203,68 @@ def compare_uploads(upload_id: int, current_user: models.User = Depends(require_
         if sec and sec.department and current_user.department and sec.department != current_user.department:
             raise HTTPException(status_code=403, detail="Access denied: upload is outside your department")
 
-    # Attempt to find the matched upload's content
+    # ── Reference document lookup (authoritative order) ──────────────────────────
     matched_upload = None
     
+    # 1. Best: use the stored matched_upload_id from metadata
     if upload.metadata_json and upload.metadata_json.get("matched_upload_id"):
-        matched_upload_id = upload.metadata_json.get("matched_upload_id")
+        matched_upload_id = int(upload.metadata_json["matched_upload_id"])
         matched_upload = db.query(models.Upload).filter(models.Upload.id == matched_upload_id).first()
-        
+    
+    # 2. Try exact-hash lookup (catches 100% exact duplicates missed by metadata)
+    if not matched_upload and upload.hash:
+        matched_upload = (
+            db.query(models.Upload)
+            .filter(models.Upload.hash == upload.hash, models.Upload.id != upload.id)
+            .order_by(models.Upload.id.asc())
+            .first()
+        )
+
+    # 3. Fall back to matched_student name → same assignment or latest upload
     if not matched_upload and upload.matched_student:
         matched_user = db.query(models.User).filter(models.User.name == upload.matched_student).first()
         if matched_user:
-            matched_upload = db.query(models.Upload).filter(
-                models.Upload.user_id == matched_user.id,
-                models.Upload.assignment_title == upload.assignment_title
-            ).first()
+            matched_upload = (
+                db.query(models.Upload)
+                .filter(
+                    models.Upload.user_id == matched_user.id,
+                    models.Upload.assignment_title == upload.assignment_title,
+                    models.Upload.id != upload.id,
+                )
+                .first()
+            )
             if not matched_upload:
-                matched_upload = db.query(models.Upload).filter(models.Upload.user_id == matched_user.id).order_by(models.Upload.upload_time.desc()).first()
+                matched_upload = (
+                    db.query(models.Upload)
+                    .filter(models.Upload.user_id == matched_user.id, models.Upload.id != upload.id)
+                    .order_by(models.Upload.upload_time.desc())
+                    .first()
+                )
     
-    if not matched_upload and upload.similarity_score == 100.0:
-        matched_upload = db.query(models.Upload).filter(models.Upload.hash == upload.hash, models.Upload.id < upload.id).first()
-        
-    original_text = upload.extracted_text or "No text content extracted for this assignment."
-    matched_text = matched_upload.extracted_text if matched_upload and matched_upload.extracted_text else "Matched assignment content is not available or is an image."
-    
+    # ── Use STORED similarity score as the authoritative score ────────────────────
+    # This guarantees the modal displays the same value as the evaluator dashboard.
+    stored_similarity = upload.similarity_score or 0.0
+
+    original_text = upload.extracted_text or ""
     upload_pages = upload.metadata_json.get("pages_text", []) if isinstance(upload.metadata_json, dict) else []
-    
-    comparison_data = compare_texts(original_text, matched_text, upload_pages, is_file_exact=(upload.similarity_score == 100.0))
-    overall_similarity = comparison_data.get("overall_similarity", upload.similarity_score)
+
+    # Only run the content comparison when we have a real reference document with text.
+    if matched_upload and matched_upload.extracted_text:
+        matched_text = matched_upload.extracted_text
+        comparison_data = compare_texts(
+            original_text, matched_text, upload_pages,
+            is_file_exact=(upload.similarity_score is not None and upload.similarity_score >= 99.9)
+        )
+    else:
+        # No reference available — return empty comparison instead of bogus data
+        comparison_data = {
+            "uploaded_highlighted": [],
+            "matched_highlighted": [],
+            "ai_summary": {"copied": [], "similar": [], "unique": []},
+            "page_heatmap": [],
+            "breakdown": {},
+            "match_statistics": {}
+        }
     
     return {
         "upload_id": upload.id,
@@ -1245,12 +1280,20 @@ def compare_uploads(upload_id: int, current_user: models.User = Depends(require_
         
         "reference_document": {
             "id": matched_upload.id if matched_upload else None,
-            "file_name": matched_upload.file_name if matched_upload else "Unknown Reference",
-            "matched_student": matched_upload.owner.name if matched_upload and matched_upload.owner else (upload.matched_student or "Unknown"),
-            "upload_time": matched_upload.upload_time.strftime("%d-%m-%Y | %I:%M %p IST") if matched_upload and matched_upload.upload_time else "Unknown"
+            "file_name": matched_upload.file_name if matched_upload else None,
+            "matched_student": (
+                matched_upload.owner.name
+                if matched_upload and matched_upload.owner
+                else (upload.matched_student or None)
+            ),
+            "upload_time": (
+                matched_upload.upload_time.strftime("%d-%m-%Y | %I:%M %p IST")
+                if matched_upload and matched_upload.upload_time else None
+            )
         },
         
-        "overall_similarity": overall_similarity,
+        # Authoritative score = stored value (same as evaluator dashboard list)
+        "overall_similarity": stored_similarity,
         "duplicate_type": upload.duplicate_type,
         
         "uploaded_highlighted": comparison_data["uploaded_highlighted"],
@@ -1281,22 +1324,40 @@ def download_highlighted_pdf(upload_id: int, type: str = "uploaded", current_use
             raise HTTPException(status_code=403, detail="Access denied: upload is outside your department")
 
     matched_upload = None
+    # 1. Best: use the stored matched_upload_id from metadata
     if upload.metadata_json and upload.metadata_json.get("matched_upload_id"):
-        matched_upload_id = upload.metadata_json.get("matched_upload_id")
+        matched_upload_id = int(upload.metadata_json["matched_upload_id"])
         matched_upload = db.query(models.Upload).filter(models.Upload.id == matched_upload_id).first()
-        
+
+    # 2. Exact hash lookup
+    if not matched_upload and upload.hash:
+        matched_upload = (
+            db.query(models.Upload)
+            .filter(models.Upload.hash == upload.hash, models.Upload.id != upload.id)
+            .order_by(models.Upload.id.asc())
+            .first()
+        )
+
+    # 3. Fall back to matched_student name
     if not matched_upload and upload.matched_student:
         matched_user = db.query(models.User).filter(models.User.name == upload.matched_student).first()
         if matched_user:
-            matched_upload = db.query(models.Upload).filter(
-                models.Upload.user_id == matched_user.id,
-                models.Upload.assignment_title == upload.assignment_title
-            ).first()
+            matched_upload = (
+                db.query(models.Upload)
+                .filter(
+                    models.Upload.user_id == matched_user.id,
+                    models.Upload.assignment_title == upload.assignment_title,
+                    models.Upload.id != upload.id,
+                )
+                .first()
+            )
             if not matched_upload:
-                matched_upload = db.query(models.Upload).filter(models.Upload.user_id == matched_user.id).order_by(models.Upload.upload_time.desc()).first()
-    
-    if not matched_upload and upload.similarity_score == 100.0:
-        matched_upload = db.query(models.Upload).filter(models.Upload.hash == upload.hash, models.Upload.id < upload.id).first()
+                matched_upload = (
+                    db.query(models.Upload)
+                    .filter(models.Upload.user_id == matched_user.id, models.Upload.id != upload.id)
+                    .order_by(models.Upload.upload_time.desc())
+                    .first()
+                )
 
     target_upload = upload if type == "uploaded" else matched_upload
     if not target_upload or not target_upload.file_path or not target_upload.file_path.endswith(".pdf"):
