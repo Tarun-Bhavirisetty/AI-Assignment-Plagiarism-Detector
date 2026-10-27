@@ -131,21 +131,25 @@ export default function DuplicateCompareModal({ uploadId, onClose }: { uploadId:
                 {/* Overall Similarity */}
                 <div className="text-center p-4 bg-white/5 rounded-xl border border-white/10">
                   <p className="text-sm text-muted-foreground uppercase font-semibold mb-2">Overall Similarity</p>
-                  <p className={`font-bold text-5xl ${
-                    Number(data.overall_similarity) >= 90 ? 'text-red-400' :
-                    Number(data.overall_similarity) >= 60 ? 'text-yellow-400' :
-                    Number(data.overall_similarity) >= 20 ? 'text-orange-400' :
-                    'text-emerald-400'
-                  }`}>
-                    {Number(data.overall_similarity).toFixed(0)}%
-                  </p>
+                  {data.overall_similarity === null || data.overall_similarity === undefined ? (
+                    <p className="font-bold text-3xl text-gray-500">N/A</p>
+                  ) : (
+                    <p className={`font-bold text-5xl ${
+                      Number(data.overall_similarity) >= 90 ? 'text-red-400' :
+                      Number(data.overall_similarity) >= 60 ? 'text-yellow-400' :
+                      Number(data.overall_similarity) >= 20 ? 'text-orange-400' :
+                      'text-emerald-400'
+                    }`}>
+                      {Number(data.overall_similarity).toFixed(0)}%
+                    </p>
+                  )}
                   {data.detection_method && (
                     <p className="text-xs text-gray-500 mt-1 uppercase tracking-wide">
-                      {data.detection_method === 'exact_hash' ? '🔒 Binary Exact Match' :
-                       data.detection_method === 'exact_content' ? '📄 Content Exact Match' :
-                       data.detection_method === 'hybrid_st_tfidf' ? '🧠 Semantic + Lexical' :
-                       data.detection_method === 'fallback_tfidf' ? '📝 Lexical Only' :
-                       data.detection_method === 'unavailable' ? '⚠ Analysis Unavailable' : ''}
+                      {data.detection_method === 'exact_hash' ? 'Binary Exact Match' :
+                       data.detection_method === 'exact_content' ? 'Content Exact Match' :
+                       data.detection_method === 'hybrid_st_tfidf' ? 'Semantic + Lexical' :
+                       data.detection_method === 'fallback_tfidf' ? 'Lexical Only' :
+                       data.detection_method === 'unavailable' ? 'Analysis Unavailable' : data.detection_method}
                     </p>
                   )}
                 </div>
@@ -190,13 +194,15 @@ export default function DuplicateCompareModal({ uploadId, onClose }: { uploadId:
                   <div className="space-y-3">
                     <h3 className="text-sm font-semibold uppercase text-muted-foreground border-b border-white/10 pb-1">Analysis Summary</h3>
                     <p className="text-xs text-gray-300 leading-relaxed border border-white/10 p-3 rounded-lg bg-black/20">
-                      {/* Derive summary text from ACTUAL backend data, not hardcoded thresholds */}
+                      {/* Derive summary from detection_method and computed overall_similarity */}
                       {data.detection_method === 'exact_hash'
                         ? 'Binary-identical files detected. Both submissions are byte-for-byte copies of the same document.'
                         : data.detection_method === 'exact_content'
                         ? 'Normalized content is identical. The documents contain the same text, possibly from different exports or formatting.'
                         : data.detection_method === 'unavailable'
                         ? 'Comparison could not be completed. Reference document text is unavailable.'
+                        : data.overall_similarity === null || data.overall_similarity === undefined
+                        ? 'No reference document available for comparison.'
                         : Number(data.overall_similarity) >= 90
                         ? `Very high textual similarity detected (${Number(data.overall_similarity).toFixed(0)}%). The submission closely matches the reference document across sentences, paragraphs, and content.`
                         : Number(data.overall_similarity) >= 60
