@@ -13,33 +13,48 @@ def generate_text_embedding(text_content: str):
 def add_to_chroma(upload_id: str, embedding: list, metadata: dict):
     if embedding is None:
         return
-    collection.add(
-        embeddings=[embedding],
-        metadatas=[metadata],
-        ids=[upload_id]
-    )
+    try:
+        collection.upsert(
+            embeddings=[embedding],
+            metadatas=[metadata],
+            ids=[upload_id]
+        )
+    except Exception:
+        try:
+            collection.add(
+                embeddings=[embedding],
+                metadatas=[metadata],
+                ids=[upload_id]
+            )
+        except Exception as e:
+            print(f"[ChromaDB] add_to_chroma warning: {e}")
 
 def search_similar(embedding: list, threshold=0.85):
     if embedding is None:
         return {"is_similar": False}
         
-    # Search top 5 candidates instead of 1 for document matching
+    # Search top 5 candidates for document matching
     results = collection.query(
         query_embeddings=[embedding],
         n_results=5
     )
     
-    if results['distances'] and results['distances'][0]:
+    if results.get('distances') and results['distances'][0]:
         distance = results['distances'][0][0]
         # In ChromaDB (using default L2), distance = 0 means exact match.
-        # We can approximate similarity % (this is a rough heuristic)
         similarity = max(0, 100 - (distance * 50)) 
+        
+        candidates = results.get('ids', [[]])[0]
+        metadatas = results.get('metadatas', [[]])[0] if results.get('metadatas') else []
+        distances = results.get('distances', [[]])[0]
         
         if similarity >= (threshold * 100):
             return {
                 "is_similar": True,
                 "similarity_score": round(similarity, 2),
-                "matched_id": results['ids'][0][0],
-                "all_candidates": results['ids'][0]
+                "matched_id": candidates[0] if candidates else None,
+                "all_candidates": candidates,
+                "all_metadatas": metadatas,
+                "all_distances": distances
             }
     return {"is_similar": False}

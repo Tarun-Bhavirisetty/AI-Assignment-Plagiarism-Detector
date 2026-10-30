@@ -262,3 +262,33 @@ MetaGuard Academic Team
             "verification_url": dev_link,
             "error_detail": str(e)
         }
+
+def send_email(to_email: str, subject: str, html_body: str) -> dict:
+    """Generic email sender for MetaGuard notifications."""
+    cfg = get_smtp_config()
+    is_valid, validation_msg = validate_smtp_config()
+    if not is_valid:
+        return {"sent": False, "reason": "unconfigured", "detail": validation_msg}
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = cfg["from_email"]
+        msg["To"] = to_email
+
+        # Attach html
+        part = MIMEText(html_body, "html")
+        msg.attach(part)
+
+        with smtplib.SMTP(cfg["host"], cfg["port"], timeout=10) as server:
+            server.ehlo()
+            if cfg["use_tls"]:
+                server.starttls()
+                server.ehlo()
+            server.login(cfg["user"], cfg["password"])
+            server.sendmail(cfg["from_email"], [to_email], msg.as_string())
+
+        return {"sent": True}
+    except Exception as e:
+        logger.warning(f"Could not send email to {to_email}: {e}")
+        return {"sent": False, "error": str(e)}

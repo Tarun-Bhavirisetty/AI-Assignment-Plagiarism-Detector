@@ -88,17 +88,17 @@ export default function UploadBox() {
   };
 
   return (
-    <div className="w-full max-w-2xl mx-auto mt-10">
+    <div className="w-full max-w-2xl mx-auto mt-6">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
         <div>
-          <label className="block text-sm font-medium mb-1 text-muted-foreground">Section / Class *</label>
+          <label className="block text-xs font-bold uppercase tracking-wider mb-1 text-muted-foreground">Section / Class *</label>
           <input
             type="text"
             list="section-options"
             placeholder="e.g. CSE-A, AIML-B"
             value={sectionName}
             onChange={(e) => setSectionName(e.target.value)}
-            className="w-full px-4 py-3 rounded-xl bg-card/40 border border-white/10 focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all"
+            className="w-full px-4 py-2.5 rounded-xl bg-card border border-border text-xs text-foreground focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all shadow-sm"
             disabled={uploading || !!result}
           />
           <datalist id="section-options">
@@ -106,21 +106,21 @@ export default function UploadBox() {
           </datalist>
         </div>
         <div>
-          <label className="block text-sm font-medium mb-1 text-muted-foreground">Assignment Title *</label>
+          <label className="block text-xs font-bold uppercase tracking-wider mb-1 text-muted-foreground">Assignment Title *</label>
           <input
             type="text"
             placeholder="e.g. DBMS Assignment 3"
             value={assignmentTitle}
             onChange={(e) => setAssignmentTitle(e.target.value)}
-            className="w-full px-4 py-3 rounded-xl bg-card/40 border border-white/10 focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all"
+            className="w-full px-4 py-2.5 rounded-xl bg-card border border-border text-xs text-foreground focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all shadow-sm"
             disabled={uploading || !!result}
           />
         </div>
       </div>
 
       <div 
-        className={`relative flex flex-col items-center justify-center p-12 border-2 border-dashed rounded-2xl transition-all duration-300 ${
-          dragActive ? 'border-primary bg-primary/10' : 'border-white/20 bg-card/40 hover:bg-card/60'
+        className={`relative flex flex-col items-center justify-center p-12 border-2 border-dashed rounded-2xl transition-all duration-300 shadow-sm ${
+          dragActive ? 'border-primary bg-primary/10' : 'border-border bg-card hover:bg-muted/30'
         }`}
         onDragEnter={handleDrag}
         onDragLeave={handleDrag}
@@ -132,35 +132,35 @@ export default function UploadBox() {
           onChange={handleChange} 
           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
         />
-        <UploadCloud className={`w-16 h-16 mb-4 ${dragActive ? 'text-primary scale-110' : 'text-gray-400'} transition-transform duration-300`} />
-        <h3 className="text-xl font-semibold mb-2">Drag & Drop your file here</h3>
-        <p className="text-muted-foreground text-sm">or click to browse (Max 50MB)</p>
+        <UploadCloud className={`w-14 h-14 mb-4 ${dragActive ? 'text-primary scale-110' : 'text-muted-foreground/60'} transition-transform duration-300`} />
+        <h3 className="text-base font-bold mb-1 text-foreground">Drag & Drop your file here</h3>
+        <p className="text-muted-foreground text-xs">or click to browse document, code, or images (Max 50MB)</p>
       </div>
 
       {file && (
-        <div className="mt-6 p-4 bg-card/60 rounded-xl border border-white/10 flex items-center justify-between">
-          <div className="flex items-center space-x-4 overflow-hidden">
-            <div className="p-2 bg-primary/20 text-primary rounded-lg">
-              <FileIcon className="w-6 h-6" />
+        <div className="mt-6 p-4 bg-card rounded-2xl border border-border flex items-center justify-between shadow-sm">
+          <div className="flex items-center space-x-3 overflow-hidden">
+            <div className="p-2.5 bg-primary/10 text-primary rounded-xl">
+              <FileIcon className="w-5 h-5" />
             </div>
             <div className="truncate">
-              <p className="text-sm font-medium truncate">{file.name}</p>
-              <p className="text-xs text-muted-foreground">{(file.size / (1024 * 1024)).toFixed(2)} MB</p>
+              <p className="text-xs font-bold text-foreground truncate">{file.name}</p>
+              <p className="text-[11px] text-muted-foreground">{(file.size / (1024 * 1024)).toFixed(2)} MB</p>
             </div>
           </div>
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center space-x-2 shrink-0">
             {!result && !uploading && (
-               <button onClick={() => setFile(null)} className="p-2 hover:bg-white/10 rounded-full transition-colors">
-                 <X className="w-5 h-5 text-gray-400" />
+               <button onClick={() => setFile(null)} className="p-2 hover:bg-muted rounded-xl text-muted-foreground hover:text-foreground transition-colors">
+                 <X className="w-4 h-4" />
                </button>
             )}
             {!result && (
               <button 
                 onClick={handleUpload}
                 disabled={uploading}
-                className="px-4 py-2 bg-primary text-white text-sm font-medium rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50 flex items-center shadow-lg shadow-primary/20"
+                className="px-4 py-2 bg-primary text-primary-foreground text-xs font-bold rounded-xl hover:bg-primary/90 transition-all disabled:opacity-50 flex items-center shadow-md shadow-primary/20"
               >
-                {uploading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Processing...</> : 'Analyze'}
+                {uploading ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Processing...</> : 'Analyze Content'}
               </button>
             )}
           </div>
@@ -168,39 +168,41 @@ export default function UploadBox() {
       )}
 
       {error && (
-        <div className="mt-4 p-4 bg-destructive/20 border border-destructive/50 text-red-200 rounded-xl flex items-center">
-          <AlertTriangle className="w-5 h-5 mr-3" />
-          <p className="text-sm">{error}</p>
+        <div className="mt-4 p-4 bg-destructive/10 border border-destructive/30 text-destructive text-xs font-semibold rounded-2xl flex items-center">
+          <AlertTriangle className="w-4 h-4 mr-2.5 shrink-0" />
+          <p>{error}</p>
         </div>
       )}
 
       {result && (
         <div className="mt-8 space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
-          <div className="p-6 rounded-2xl bg-card/40 border border-white/10">
-            <h4 className="text-xl font-semibold mb-6 flex items-center">
-              Upload Results
+          <div className="p-6 rounded-2xl bg-card border border-border shadow-sm">
+            <h4 className="text-lg font-bold mb-4 flex items-center text-foreground">
+              Upload Analysis Results
             </h4>
             
-            <div className="p-6 rounded-xl border mb-6 border-emerald-500/50 bg-emerald-500/10 flex items-start">
-              <CheckCircle2 className="w-8 h-8 text-emerald-500 mr-4 mt-1" />
+            <div className="p-4 rounded-xl border mb-6 border-emerald-500/30 bg-emerald-500/10 flex items-start">
+              <CheckCircle2 className="w-6 h-6 text-emerald-600 dark:text-emerald-400 mr-3 mt-0.5 shrink-0" />
               <div>
-                <h3 className="text-xl font-bold mb-1">Upload Successful</h3>
-                <p className="text-muted-foreground text-sm">
-                  Your file has been safely securely stored and analyzed by MetaGuard.
+                <h3 className="text-sm font-bold text-emerald-700 dark:text-emerald-300 mb-0.5">Upload & Indexing Successful</h3>
+                <p className="text-muted-foreground text-xs leading-relaxed">
+                  Your submission has been securely ingested, hashed, and indexed into the ChromaDB vector database.
                 </p>
               </div>
             </div>
 
-            <h4 className="text-lg font-semibold mb-4 border-b border-white/10 pb-2">Extracted Metadata</h4>
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+            <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3 border-b border-border pb-1.5">
+              Extracted Document Metadata
+            </h4>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               {Object.entries(result.metadata || {}).map(([key, value]) => (
-                <div key={key} className="bg-black/30 p-3 rounded-lg">
-                  <p className="text-xs text-muted-foreground uppercase tracking-wider">{key.replace('_', ' ')}</p>
-                  <p className="text-sm font-medium truncate" title={String(value)}>{String(value)}</p>
+                <div key={key} className="bg-muted/40 border border-border p-3 rounded-xl">
+                  <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">{key.replace('_', ' ')}</p>
+                  <p className="text-xs font-bold text-foreground truncate mt-0.5" title={String(value)}>{String(value)}</p>
                 </div>
               ))}
               {Object.keys(result.metadata || {}).length === 0 && (
-                <p className="text-sm text-muted-foreground col-span-full">No metadata extracted for this file type.</p>
+                <p className="text-xs text-muted-foreground col-span-full">No metadata extracted for this file type.</p>
               )}
             </div>
             
@@ -212,7 +214,7 @@ export default function UploadBox() {
                    setSectionName('');
                    setAssignmentTitle('');
                  }}
-                 className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition-colors"
+                 className="px-4 py-2 bg-muted hover:bg-muted/80 text-foreground text-xs font-bold rounded-xl border border-border transition-colors shadow-sm"
                >
                  Upload Another Assignment
                </button>

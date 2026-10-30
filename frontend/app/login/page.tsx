@@ -1,70 +1,76 @@
 "use client";
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
-import api from '@/lib/api';
-import { Loader2, MailCheck, ShieldCheck, ArrowRight, AlertCircle, CheckCircle2 } from 'lucide-react';
+
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import api from "@/lib/api";
+import { Loader2, MailCheck, ShieldCheck, ArrowRight, AlertCircle, CheckCircle2, GraduationCap, Briefcase, UserCheck, Shield } from "lucide-react";
 
 export default function Login() {
   const [isLogin, setIsLogin] = useState(true);
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [name, setName] = useState('');
-  const [registrationNumber, setRegistrationNumber] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [department, setDepartment] = useState('Computer Science');
-  
+  const [loginRole, setLoginRole] = useState<string>("student");
+  const [regRole, setRegRole] = useState<"student" | "faculty">("student");
+
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
+  const [registrationNumber, setRegistrationNumber] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [department, setDepartment] = useState("Computer Science");
+
   const [loading, setLoading] = useState(false);
   const [resending, setResending] = useState(false);
-  const [error, setError] = useState('');
-  const [infoMessage, setInfoMessage] = useState('');
+  const [error, setError] = useState("");
+  const [infoMessage, setInfoMessage] = useState("");
   const [verificationUrl, setVerificationUrl] = useState<string | null>(null);
   const [showResend, setShowResend] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<{ [key: string]: string }>({});
   const router = useRouter();
 
   const handleLoginSuccess = (role: string) => {
-    if (role === 'admin') {
-      window.location.href = '/dashboard';
-    } else if (role === 'hod') {
-      window.location.href = '/hod-dashboard';
-    } else if (role === 'evaluator') {
-      window.location.href = '/evaluator-dashboard';
+    if (role === "admin") {
+      window.location.href = "/dashboard";
+    } else if (role === "hod") {
+      window.location.href = "/hod-dashboard";
+    } else if (role === "faculty") {
+      window.location.href = "/faculty-dashboard";
+    } else if (role === "evaluator") {
+      window.location.href = "/evaluator-dashboard";
     } else {
-      window.location.href = '/user-dashboard';
+      window.location.href = "/user-dashboard";
     }
   };
 
   const validateRegistration = () => {
     const errors: { [key: string]: string } = {};
     if (!name.trim()) {
-      errors.name = 'Full Name is required';
+      errors.name = "Full Name is required";
     } else if (name.trim().length < 2) {
-      errors.name = 'Full Name must be at least 2 characters';
+      errors.name = "Full Name must be at least 2 characters";
     }
 
     if (!registrationNumber.trim()) {
-      errors.registrationNumber = 'Registration Number is required';
+      errors.registrationNumber = regRole === "faculty" ? "Faculty ID / Employee ID is required" : "Registration Number is required";
     } else if (!/^[A-Za-z0-9\-_/]+$/.test(registrationNumber.trim())) {
-      errors.registrationNumber = 'Only letters, numbers, hyphens, and slashes allowed';
+      errors.registrationNumber = "Only letters, numbers, hyphens, and slashes allowed";
     }
 
     const emailRegex = /^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$/;
     if (!email.trim()) {
-      errors.email = 'Email Address is required';
+      errors.email = "Email Address is required";
     } else if (!emailRegex.test(email.trim())) {
-      errors.email = 'Please enter a valid email address';
+      errors.email = "Please enter a valid email address";
     }
 
     if (!password) {
-      errors.password = 'Password is required';
+      errors.password = "Password is required";
     } else if (password.length < 6) {
-      errors.password = 'Password must be at least 6 characters';
+      errors.password = "Password must be at least 6 characters";
     }
 
     if (!confirmPassword) {
-      errors.confirmPassword = 'Confirm Password is required';
+      errors.confirmPassword = "Confirm Password is required";
     } else if (confirmPassword !== password) {
-      errors.confirmPassword = 'Passwords do not match';
+      errors.confirmPassword = "Passwords do not match";
     }
 
     setFieldErrors(errors);
@@ -73,8 +79,8 @@ export default function Login() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError('');
-    setInfoMessage('');
+    setError("");
+    setInfoMessage("");
     setShowResend(false);
 
     if (!isLogin) {
@@ -86,21 +92,26 @@ export default function Login() {
 
     try {
       if (isLogin) {
-        const res = await api.post('/login', { email: email.trim(), password });
-        localStorage.setItem('token', res.data.access_token);
-        localStorage.setItem('role', res.data.role);
+        const res = await api.post("/login", {
+          email: email.trim(),
+          password,
+          role: loginRole,
+        });
+        localStorage.setItem("token", res.data.access_token);
+        localStorage.setItem("role", res.data.role);
         if (res.data.user) {
-          localStorage.setItem('user', JSON.stringify(res.data.user));
+          localStorage.setItem("user", JSON.stringify(res.data.user));
         }
         handleLoginSuccess(res.data.role);
       } else {
-        const res = await api.post('/signup', {
+        const res = await api.post("/signup", {
           name: name.trim(),
           registration_number: registrationNumber.trim(),
           email: email.trim(),
           password,
           confirm_password: confirmPassword,
-          department: department.trim() || 'Computer Science'
+          department: department.trim() || "Computer Science",
+          role: regRole,
         });
 
         if (res.data.success) {
@@ -108,11 +119,10 @@ export default function Login() {
           if (res.data.verification_url) {
             setVerificationUrl(res.data.verification_url);
           }
-          // Clear registration inputs
-          setName('');
-          setRegistrationNumber('');
-          setPassword('');
-          setConfirmPassword('');
+          setName("");
+          setRegistrationNumber("");
+          setPassword("");
+          setConfirmPassword("");
           setFieldErrors({});
           setIsLogin(true);
         }
@@ -135,77 +145,124 @@ export default function Login() {
     }
     setResending(true);
     try {
-      const res = await api.post('/resend-verification', { email: email.trim() });
-      setInfoMessage(res.data.message || "Verification email sent.");
+      const res = await api.post("/resend-verification", { email: email.trim() });
+      setInfoMessage(res.data.message || "Verification email sent! Please check your inbox.");
       if (res.data.verification_url) {
         setVerificationUrl(res.data.verification_url);
       }
       setShowResend(false);
     } catch (err: any) {
-      setError(err.response?.data?.detail || "Failed to resend verification link.");
+      setError(err.response?.data?.detail || "Failed to resend verification email.");
     } finally {
       setResending(false);
     }
   };
 
-  return (
-    <div className="flex min-h-[calc(100vh-4rem)] items-center justify-center p-4">
-      <div className="w-full max-w-md p-8 space-y-6 rounded-2xl bg-card/40 backdrop-blur-xl border border-white/10 shadow-2xl relative overflow-hidden">
-        
-        {/* Glow effect */}
-        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-48 h-48 bg-primary/30 rounded-full blur-[60px] pointer-events-none"></div>
+  const rolesList = [
+    { id: "student", label: "Student", icon: GraduationCap },
+    { id: "faculty", label: "Faculty", icon: Briefcase },
+    { id: "evaluator", label: "Evaluator", icon: UserCheck },
+    { id: "hod", label: "HOD / Admin", icon: Shield },
+  ];
 
-        {/* Tab Switcher */}
-        <div className="flex rounded-lg bg-black/40 p-1 border border-white/10 relative z-10">
-          <button
-            type="button"
-            onClick={() => {
-              setIsLogin(true);
-              setError('');
-              setFieldErrors({});
-            }}
-            className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${
-              isLogin
-                ? 'bg-primary text-white shadow'
-                : 'text-gray-400 hover:text-white'
-            }`}
-          >
-            Sign In
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setIsLogin(false);
-              setError('');
-              setFieldErrors({});
-            }}
-            className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${
-              !isLogin
-                ? 'bg-primary text-white shadow'
-                : 'text-gray-400 hover:text-white'
-            }`}
-          >
-            Register as Student
-          </button>
+  return (
+    <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center p-4 relative overflow-hidden bg-background transition-colors duration-200">
+      {/* Background ambient lighting */}
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-primary/10 rounded-full blur-[140px] -z-10 pointer-events-none" />
+
+      <div className="max-w-md w-full p-8 rounded-2xl bg-card border border-border shadow-2xl relative z-10 space-y-6 transition-colors duration-200">
+        {/* Header */}
+        <div className="text-center">
+          <div className="inline-flex p-3 rounded-2xl bg-primary/10 border border-primary/20 mb-3 shadow-inner">
+            <ShieldCheck className="w-8 h-8 text-primary" />
+          </div>
+          <h2 className="text-2xl font-bold tracking-tight text-foreground">
+            {isLogin ? "Welcome Back to MetaGuard" : "Create Your Account"}
+          </h2>
+          <p className="text-sm text-muted-foreground mt-1">
+            {isLogin
+              ? "Select your institutional role and sign in"
+              : "Register to submit or review academic assignments"}
+          </p>
         </div>
-        
-        <h2 className="text-2xl font-bold text-center text-white relative z-10">
-          {isLogin ? 'Welcome Back' : 'Create Student Account'}
-        </h2>
-        
+
+        {/* Role Selector */}
+        {isLogin ? (
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
+              Select Your Role
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              {rolesList.map((r) => {
+                const Icon = r.icon;
+                const isSelected = loginRole === r.id;
+                return (
+                  <button
+                    key={r.id}
+                    type="button"
+                    onClick={() => setLoginRole(r.id)}
+                    className={`flex items-center gap-2 p-2.5 rounded-xl border text-xs font-semibold transition-all ${
+                      isSelected
+                        ? "bg-primary text-white border-primary shadow-sm"
+                        : "bg-muted/40 hover:bg-muted text-muted-foreground hover:text-foreground border-border"
+                    }`}
+                  >
+                    <Icon className="w-4 h-4 shrink-0" />
+                    <span>{r.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
+              Register As
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setRegRole("student")}
+                className={`flex items-center justify-center gap-2 p-2.5 rounded-xl border text-xs font-semibold transition-all ${
+                  regRole === "student"
+                    ? "bg-primary text-white border-primary shadow-sm"
+                    : "bg-muted/40 hover:bg-muted text-muted-foreground hover:text-foreground border-border"
+                }`}
+              >
+                <GraduationCap className="w-4 h-4" />
+                <span>Student</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setRegRole("faculty")}
+                className={`flex items-center justify-center gap-2 p-2.5 rounded-xl border text-xs font-semibold transition-all ${
+                  regRole === "faculty"
+                    ? "bg-primary text-white border-primary shadow-sm"
+                    : "bg-muted/40 hover:bg-muted text-muted-foreground hover:text-foreground border-border"
+                }`}
+              >
+                <Briefcase className="w-4 h-4" />
+                <span>Faculty</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Notifications / Alerts */}
         {error && (
-          <div className="p-3 text-sm text-red-200 bg-red-900/50 rounded-lg border border-red-900/80 flex items-start space-x-2">
-            <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+          <div className="p-3.5 rounded-xl bg-destructive/10 border border-destructive/20 text-destructive text-sm flex items-start gap-2.5">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <div className="flex-1">
-              <span>{error}</span>
+              <p>{error}</p>
               {showResend && (
-                <button 
-                  type="button" 
+                <button
+                  type="button"
                   onClick={handleResend}
                   disabled={resending}
-                  className="block mt-2 font-semibold text-primary-300 underline hover:text-white"
+                  className="mt-2 text-xs font-semibold underline hover:no-underline flex items-center gap-1"
                 >
-                  {resending ? "Sending link..." : "Click here to resend verification link"}
+                  {resending ? <Loader2 className="w-3 h-3 animate-spin" /> : <MailCheck className="w-3 h-3" />}
+                  Resend verification email
                 </button>
               )}
             </div>
@@ -213,87 +270,80 @@ export default function Login() {
         )}
 
         {infoMessage && (
-          <div className="p-3 text-sm text-emerald-200 bg-emerald-950/60 rounded-lg border border-emerald-800">
-            <div className="flex items-start space-x-2">
-              <MailCheck className="w-5 h-5 text-emerald-400 flex-shrink-0 mt-0.5" />
-              <div className="flex-1">
-                <span>{infoMessage}</span>
-              </div>
-            </div>
-            {verificationUrl && (
-              <div className="mt-3 p-3 bg-black/60 rounded border border-emerald-500/40">
-                <p className="text-xs text-amber-300 font-medium mb-1">
-                  Direct Verification Link (Local / Dev Environment):
-                </p>
-                <a 
+          <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-sm flex items-start gap-2.5">
+            <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+            <div className="flex-1 space-y-1">
+              <p>{infoMessage}</p>
+              {verificationUrl && (
+                <a
                   href={verificationUrl}
-                  className="text-xs font-semibold text-emerald-400 hover:underline flex items-center break-all"
+                  className="inline-flex items-center text-xs font-semibold text-primary hover:underline mt-1 gap-1"
                 >
-                  Click Here to Verify Your Email <ArrowRight className="w-3.5 h-3.5 ml-1 flex-shrink-0" />
+                  Verify Now <ArrowRight className="w-3 h-3" />
                 </a>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-4 relative z-10" noValidate>
+        {/* Main Form */}
+        <form onSubmit={handleSubmit} className="space-y-4">
           {!isLogin && (
             <>
-              {/* Field 1: Full Name */}
+              {/* Full Name */}
               <div>
-                <label className="block text-sm font-medium text-gray-300">
-                  Full Name <span className="text-red-400">*</span>
+                <label className="block text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">
+                  Full Name <span className="text-destructive">*</span>
                 </label>
-                <input 
-                  type="text" 
-                  required 
-                  placeholder="e.g. Alex Johnson"
-                  className={`mt-1 block w-full px-4 py-2 bg-black/50 border ${
-                    fieldErrors.name ? 'border-red-500 ring-1 ring-red-500' : 'border-white/10'
-                  } rounded-md text-white focus:ring-primary focus:border-primary outline-none transition-colors`}
+                <input
+                  type="text"
+                  required
+                  placeholder={regRole === "faculty" ? "Dr. Jane Doe" : "Alex Johnson"}
+                  className={`block w-full px-3.5 py-2 rounded-xl bg-muted/40 border ${
+                    fieldErrors.name ? "border-destructive ring-1 ring-destructive" : "border-border"
+                  } text-foreground placeholder:text-muted-foreground/60 text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all`}
                   value={name}
                   onChange={(e) => {
                     setName(e.target.value);
-                    if (fieldErrors.name) setFieldErrors({ ...fieldErrors, name: '' });
+                    if (fieldErrors.name) setFieldErrors({ ...fieldErrors, name: "" });
                   }}
                 />
-                {fieldErrors.name && (
-                  <p className="text-xs text-red-400 mt-1">{fieldErrors.name}</p>
-                )}
+                {fieldErrors.name && <p className="text-xs text-destructive mt-1">{fieldErrors.name}</p>}
               </div>
 
-              {/* Field 2: Registration Number */}
+              {/* ID Field */}
               <div>
-                <label className="block text-sm font-medium text-gray-300">
-                  Registration Number <span className="text-red-400">*</span>
+                <label className="block text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">
+                  {regRole === "faculty" ? "Faculty ID / Employee ID" : "Student Registration Number"}{" "}
+                  <span className="text-destructive">*</span>
                 </label>
-                <input 
-                  type="text" 
-                  required 
-                  placeholder="e.g. 21CS045"
-                  className={`mt-1 block w-full px-4 py-2 bg-black/50 border ${
-                    fieldErrors.registrationNumber ? 'border-red-500 ring-1 ring-red-500' : 'border-white/10'
-                  } rounded-md text-white focus:ring-primary focus:border-primary outline-none transition-colors uppercase`}
+                <input
+                  type="text"
+                  required
+                  placeholder={regRole === "faculty" ? "FAC1024" : "23BCE1042"}
+                  className={`block w-full px-3.5 py-2 rounded-xl bg-muted/40 border ${
+                    fieldErrors.registrationNumber ? "border-destructive ring-1 ring-destructive" : "border-border"
+                  } text-foreground placeholder:text-muted-foreground/60 text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all`}
                   value={registrationNumber}
                   onChange={(e) => {
-                    setRegistrationNumber(e.target.value.toUpperCase());
-                    if (fieldErrors.registrationNumber) setFieldErrors({ ...fieldErrors, registrationNumber: '' });
+                    setRegistrationNumber(e.target.value);
+                    if (fieldErrors.registrationNumber) setFieldErrors({ ...fieldErrors, registrationNumber: "" });
                   }}
                 />
                 {fieldErrors.registrationNumber && (
-                  <p className="text-xs text-red-400 mt-1">{fieldErrors.registrationNumber}</p>
+                  <p className="text-xs text-destructive mt-1">{fieldErrors.registrationNumber}</p>
                 )}
               </div>
 
-              {/* Department (Optional) */}
+              {/* Department */}
               <div>
-                <label className="block text-sm font-medium text-gray-300">
+                <label className="block text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">
                   Department
                 </label>
-                <input 
-                  type="text" 
-                  placeholder="e.g. Computer Science"
-                  className="mt-1 block w-full px-4 py-2 bg-black/50 border border-white/10 rounded-md text-white focus:ring-primary focus:border-primary outline-none transition-colors"
+                <input
+                  type="text"
+                  placeholder="Computer Science"
+                  className="block w-full px-3.5 py-2 rounded-xl bg-muted/40 border border-border text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all"
                   value={department}
                   onChange={(e) => setDepartment(e.target.value)}
                 />
@@ -301,107 +351,109 @@ export default function Login() {
             </>
           )}
 
-          {/* Field 3: Email Address */}
+          {/* Email Address */}
           <div>
-            <label className="block text-sm font-medium text-gray-300">
-              Email Address <span className="text-red-400">*</span>
+            <label className="block text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">
+              Email Address <span className="text-destructive">*</span>
             </label>
-            <input 
-              type="email" 
-              required 
-              placeholder="student@university.edu"
-              className={`mt-1 block w-full px-4 py-2 bg-black/50 border ${
-                fieldErrors.email ? 'border-red-500 ring-1 ring-red-500' : 'border-white/10'
-              } rounded-md text-white focus:ring-primary focus:border-primary outline-none transition-colors`}
+            <input
+              type="email"
+              required
+              placeholder={isLogin ? "user@university.edu" : regRole === "faculty" ? "faculty@university.edu" : "student@university.edu"}
+              className={`block w-full px-3.5 py-2 rounded-xl bg-muted/40 border ${
+                fieldErrors.email ? "border-destructive ring-1 ring-destructive" : "border-border"
+              } text-foreground placeholder:text-muted-foreground/60 text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all`}
               value={email}
               onChange={(e) => {
                 setEmail(e.target.value);
-                if (fieldErrors.email) setFieldErrors({ ...fieldErrors, email: '' });
+                if (fieldErrors.email) setFieldErrors({ ...fieldErrors, email: "" });
               }}
             />
-            {fieldErrors.email && (
-              <p className="text-xs text-red-400 mt-1">{fieldErrors.email}</p>
-            )}
+            {fieldErrors.email && <p className="text-xs text-destructive mt-1">{fieldErrors.email}</p>}
           </div>
 
-          {/* Field 4: Password */}
+          {/* Password */}
           <div>
-            <label className="block text-sm font-medium text-gray-300">
-              Password <span className="text-red-400">*</span>
+            <label className="block text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">
+              Password <span className="text-destructive">*</span>
             </label>
-            <input 
-              type="password" 
-              required 
+            <input
+              type="password"
+              required
               placeholder={isLogin ? "••••••••" : "At least 6 characters"}
-              className={`mt-1 block w-full px-4 py-2 bg-black/50 border ${
-                fieldErrors.password ? 'border-red-500 ring-1 ring-red-500' : 'border-white/10'
-              } rounded-md text-white focus:ring-primary focus:border-primary outline-none transition-colors`}
+              className={`block w-full px-3.5 py-2 rounded-xl bg-muted/40 border ${
+                fieldErrors.password ? "border-destructive ring-1 ring-destructive" : "border-border"
+              } text-foreground placeholder:text-muted-foreground/60 text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all`}
               value={password}
               onChange={(e) => {
                 setPassword(e.target.value);
-                if (fieldErrors.password) setFieldErrors({ ...fieldErrors, password: '' });
+                if (fieldErrors.password) setFieldErrors({ ...fieldErrors, password: "" });
               }}
             />
-            {fieldErrors.password && (
-              <p className="text-xs text-red-400 mt-1">{fieldErrors.password}</p>
-            )}
+            {fieldErrors.password && <p className="text-xs text-destructive mt-1">{fieldErrors.password}</p>}
           </div>
 
-          {/* Field 5: Confirm Password (Registration only) */}
+          {/* Confirm Password (Registration only) */}
           {!isLogin && (
             <div>
-              <label className="block text-sm font-medium text-gray-300">
-                Confirm Password <span className="text-red-400">*</span>
+              <label className="block text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">
+                Confirm Password <span className="text-destructive">*</span>
               </label>
-              <input 
-                type="password" 
-                required 
+              <input
+                type="password"
+                required
                 placeholder="Re-enter your password"
-                className={`mt-1 block w-full px-4 py-2 bg-black/50 border ${
-                  fieldErrors.confirmPassword ? 'border-red-500 ring-1 ring-red-500' : 'border-white/10'
-                } rounded-md text-white focus:ring-primary focus:border-primary outline-none transition-colors`}
+                className={`block w-full px-3.5 py-2 rounded-xl bg-muted/40 border ${
+                  fieldErrors.confirmPassword ? "border-destructive ring-1 ring-destructive" : "border-border"
+                } text-foreground placeholder:text-muted-foreground/60 text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all`}
                 value={confirmPassword}
                 onChange={(e) => {
                   setConfirmPassword(e.target.value);
-                  if (fieldErrors.confirmPassword) setFieldErrors({ ...fieldErrors, confirmPassword: '' });
+                  if (fieldErrors.confirmPassword) setFieldErrors({ ...fieldErrors, confirmPassword: "" });
                 }}
               />
               {fieldErrors.confirmPassword && (
-                <p className="text-xs text-red-400 mt-1">{fieldErrors.confirmPassword}</p>
+                <p className="text-xs text-destructive mt-1">{fieldErrors.confirmPassword}</p>
               )}
             </div>
           )}
 
-          <button 
-            type="submit" 
+          {/* Submit button */}
+          <button
+            type="submit"
             disabled={loading}
-            className="w-full flex items-center justify-center py-2.5 px-4 border border-transparent rounded-lg shadow-sm text-sm font-semibold text-white bg-primary hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary disabled:opacity-50 transition-all shadow-[0_0_20px_rgba(99,102,241,0.4)]"
+            className="w-full flex items-center justify-center py-2.5 px-4 rounded-xl text-sm font-semibold text-white bg-primary hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 disabled:opacity-50 transition-all shadow-[0_0_20px_rgba(99,102,241,0.35)] mt-2"
           >
             {loading ? (
               <>
-                <Loader2 className="w-5 h-5 animate-spin mr-2" />
-                {isLogin ? 'Signing In...' : 'Registering...'}
+                <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                {isLogin ? "Signing In..." : "Registering..."}
               </>
+            ) : isLogin ? (
+              "Sign In"
+            ) : regRole === "faculty" ? (
+              "Create Faculty Account"
             ) : (
-              isLogin ? 'Sign In' : 'Create Student Account'
+              "Create Student Account"
             )}
           </button>
         </form>
 
-        <div className="text-center text-sm text-gray-400 relative z-10 pt-2 border-t border-white/5">
-          {isLogin ? "Don't have an account? " : "Already have an account? "}
-          <button 
-            type="button" 
+        {/* Footer switch */}
+        <div className="text-center text-xs text-muted-foreground pt-2 border-t border-border">
+          {isLogin ? "Need a new account? " : "Already registered? "}
+          <button
+            type="button"
             onClick={() => {
               setIsLogin(!isLogin);
-              setError('');
-              setInfoMessage('');
+              setError("");
+              setInfoMessage("");
               setVerificationUrl(null);
               setFieldErrors({});
-            }} 
+            }}
             className="text-primary hover:underline font-semibold"
           >
-            {isLogin ? 'Register as Student' : 'Sign In'}
+            {isLogin ? "Register as Student or Faculty" : "Sign In to Existing Account"}
           </button>
         </div>
       </div>

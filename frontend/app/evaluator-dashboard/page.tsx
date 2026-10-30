@@ -3,9 +3,11 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import api from '@/lib/api';
-import { Loader2, Users, FileText, CheckCircle, Clock, AlertTriangle, Edit3, Eye, Search, Filter } from 'lucide-react';
+import { Loader2, Users, FileText, CheckCircle, Clock, AlertTriangle, Edit3, Eye, Search, Filter, Plus, BookOpen } from 'lucide-react';
 import DuplicateCompareModal from '@/components/DuplicateCompareModal';
 import DocumentPreviewModal from '@/components/DocumentPreviewModal';
+import { AssignmentsManagementView } from '@/components/AssignmentsManagementView';
+import { CreateAssignmentModal } from '@/components/CreateAssignmentModal';
 
 export default function EvaluatorDashboard() {
   const router = useRouter();
@@ -28,6 +30,12 @@ export default function EvaluatorDashboard() {
   const [comments, setComments] = useState<string>('');
   const [savingEval, setSavingEval] = useState(false);
   const [evalSuccess, setEvalSuccess] = useState('');
+
+  // Coursework assignments state
+  const [activeTab, setActiveTab] = useState<'submissions' | 'assignments'>('submissions');
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [refreshAssignmentsTrigger, setRefreshAssignmentsTrigger] = useState(0);
+  const [token, setToken] = useState<string>('');
 
   const fetchData = async () => {
     try {
@@ -57,6 +65,7 @@ export default function EvaluatorDashboard() {
     } else if (role !== 'evaluator' && role !== 'admin') {
       router.push('/user-dashboard');
     } else {
+      setToken(token);
       fetchData();
     }
   }, [router]);
@@ -70,7 +79,6 @@ export default function EvaluatorDashboard() {
     setComments(sub.comments || '');
     setEvalSuccess('');
 
-    // Fetch existing details
     try {
       const res = await api.get(`/evaluations/${sub.id}`);
       if (res.data) {
@@ -109,7 +117,11 @@ export default function EvaluatorDashboard() {
   };
 
   if (loading) {
-    return <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>;
+    return (
+      <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center">
+        <Loader2 className="w-8 h-8 animate-spin text-primary" />
+      </div>
+    );
   }
 
   const completedCount = submissions.filter(s => s.evaluation_status === 'Evaluation Completed').length;
@@ -131,59 +143,101 @@ export default function EvaluatorDashboard() {
   return (
     <div className="container mx-auto px-4 py-8 max-w-7xl">
       {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between pb-6 mb-8 border-b border-white/10 gap-4">
+      <div className="flex flex-col md:flex-row md:items-center justify-between pb-6 mb-8 border-b border-border gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-white">Evaluator Dashboard</h1>
-          <p className="text-muted-foreground mt-1">
-            Review assignment submissions, evaluate plagiarism similarity, and record academic evaluations.
+          <h1 className="text-2xl sm:text-3xl font-extrabold text-foreground">Evaluator Dashboard</h1>
+          <p className="text-muted-foreground mt-1 text-sm">
+            Review assignment submissions, evaluate plagiarism similarity, manage coursework, and record academic evaluations.
           </p>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="flex items-center bg-muted/60 p-1 rounded-xl border border-border">
+            <button
+              onClick={() => setActiveTab("submissions")}
+              className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+                activeTab === "submissions"
+                  ? "bg-card text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Submissions & Evaluation
+            </button>
+            <button
+              onClick={() => setActiveTab("assignments")}
+              className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+                activeTab === "assignments"
+                  ? "bg-card text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Coursework Assignments
+            </button>
+          </div>
+
+          <button
+            onClick={() => setIsCreateModalOpen(true)}
+            className="px-3.5 py-2 bg-primary hover:bg-primary/90 text-primary-foreground text-xs font-semibold rounded-xl shadow-md transition-all flex items-center gap-1.5"
+          >
+            <Plus className="w-4 h-4" />
+            <span>New Assignment</span>
+          </button>
         </div>
       </div>
 
-      {/* Metrics */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-        <div className="p-6 rounded-2xl bg-card/40 border border-white/10 flex items-center space-x-4">
-          <div className="p-4 bg-primary/20 rounded-xl"><Users className="w-7 h-7 text-primary" /></div>
+      {activeTab === 'assignments' ? (
+        <AssignmentsManagementView
+          userRole="evaluator"
+          token={token}
+          onCreateClick={() => setIsCreateModalOpen(true)}
+          refreshTrigger={refreshAssignmentsTrigger}
+        />
+      ) : (
+        <>
+          {/* Metrics */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-6 mb-8">
+        <div className="p-6 rounded-2xl bg-card border border-border shadow-sm flex items-center space-x-4">
+          <div className="p-4 bg-primary/10 rounded-xl text-primary"><Users className="w-7 h-7" /></div>
           <div>
-            <p className="text-muted-foreground text-xs uppercase font-semibold">Assigned Sections</p>
-            <h4 className="text-2xl font-bold text-white">{assignedSections.length}</h4>
+            <p className="text-muted-foreground text-[11px] uppercase font-bold tracking-wider">Assigned Sections</p>
+            <h4 className="text-2xl font-black text-foreground mt-1">{assignedSections.length}</h4>
           </div>
         </div>
 
-        <div className="p-6 rounded-2xl bg-card/40 border border-white/10 flex items-center space-x-4">
-          <div className="p-4 bg-blue-500/20 rounded-xl"><FileText className="w-7 h-7 text-blue-400" /></div>
+        <div className="p-6 rounded-2xl bg-card border border-border shadow-sm flex items-center space-x-4">
+          <div className="p-4 bg-blue-500/10 rounded-xl text-blue-500"><FileText className="w-7 h-7" /></div>
           <div>
-            <p className="text-muted-foreground text-xs uppercase font-semibold">Submissions to Review</p>
-            <h4 className="text-2xl font-bold text-white">{submissions.length}</h4>
+            <p className="text-muted-foreground text-[11px] uppercase font-bold tracking-wider">Submissions to Review</p>
+            <h4 className="text-2xl font-black text-foreground mt-1">{submissions.length}</h4>
           </div>
         </div>
 
-        <div className="p-6 rounded-2xl bg-card/40 border border-white/10 flex items-center space-x-4">
-          <div className="p-4 bg-yellow-500/20 rounded-xl"><Clock className="w-7 h-7 text-yellow-400" /></div>
+        <div className="p-6 rounded-2xl bg-card border border-border shadow-sm flex items-center space-x-4">
+          <div className="p-4 bg-yellow-500/10 rounded-xl text-yellow-500"><Clock className="w-7 h-7" /></div>
           <div>
-            <p className="text-muted-foreground text-xs uppercase font-semibold">Pending Evaluation</p>
-            <h4 className="text-2xl font-bold text-yellow-400">{pendingCount}</h4>
+            <p className="text-muted-foreground text-[11px] uppercase font-bold tracking-wider">Pending Evaluation</p>
+            <h4 className="text-2xl font-black text-yellow-600 dark:text-yellow-400 mt-1">{pendingCount}</h4>
           </div>
         </div>
 
-        <div className="p-6 rounded-2xl bg-card/40 border border-white/10 flex items-center space-x-4">
-          <div className="p-4 bg-emerald-500/20 rounded-xl"><CheckCircle className="w-7 h-7 text-emerald-400" /></div>
+        <div className="p-6 rounded-2xl bg-card border border-border shadow-sm flex items-center space-x-4">
+          <div className="p-4 bg-emerald-500/10 rounded-xl text-emerald-500"><CheckCircle className="w-7 h-7" /></div>
           <div>
-            <p className="text-muted-foreground text-xs uppercase font-semibold">Completed</p>
-            <h4 className="text-2xl font-bold text-emerald-400">{completedCount}</h4>
+            <p className="text-muted-foreground text-[11px] uppercase font-bold tracking-wider">Completed</p>
+            <h4 className="text-2xl font-black text-emerald-600 dark:text-emerald-400 mt-1">{completedCount}</h4>
           </div>
         </div>
       </div>
 
       {/* Filters & Search */}
-      <div className="p-6 rounded-2xl bg-card/40 border border-white/10 mb-8 space-y-4">
+      <div className="p-6 rounded-2xl bg-card border border-border shadow-sm mb-8 space-y-4">
         <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
           <div className="relative w-full md:w-80">
-            <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <Search className="w-4 h-4 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
             <input 
               type="text"
               placeholder="Search student, reg no, or file..."
-              className="w-full pl-9 pr-4 py-2 bg-black/40 border border-white/10 rounded-lg text-sm text-white focus:outline-none focus:border-primary"
+              className="w-full pl-9 pr-4 py-2 bg-muted/40 border border-border rounded-xl text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
@@ -191,7 +245,7 @@ export default function EvaluatorDashboard() {
 
           <div className="flex flex-wrap gap-3 w-full md:w-auto">
             <select
-              className="px-3 py-2 bg-black/40 border border-white/10 rounded-lg text-sm text-white focus:outline-none"
+              className="px-3 py-2 bg-muted/40 border border-border rounded-xl text-xs font-medium text-foreground focus:outline-none"
               value={filterSection}
               onChange={(e) => setFilterSection(e.target.value)}
             >
@@ -202,7 +256,7 @@ export default function EvaluatorDashboard() {
             </select>
 
             <select
-              className="px-3 py-2 bg-black/40 border border-white/10 rounded-lg text-sm text-white focus:outline-none"
+              className="px-3 py-2 bg-muted/40 border border-border rounded-xl text-xs font-medium text-foreground focus:outline-none"
               value={filterStatus}
               onChange={(e) => setFilterStatus(e.target.value)}
             >
@@ -219,7 +273,7 @@ export default function EvaluatorDashboard() {
         <div className="overflow-x-auto pt-2">
           <table className="w-full text-left border-collapse">
             <thead>
-              <tr className="border-b border-white/10 text-muted-foreground text-xs uppercase font-semibold">
+              <tr className="border-b border-border text-muted-foreground text-[11px] uppercase font-bold tracking-wider">
                 <th className="pb-3 pr-4">Student</th>
                 <th className="pb-3 px-3">Reg No</th>
                 <th className="pb-3 px-3">Assignment / File</th>
@@ -233,73 +287,73 @@ export default function EvaluatorDashboard() {
             <tbody>
               {filteredSubmissions.length > 0 ? (
                 filteredSubmissions.map((sub: any) => (
-                  <tr key={sub.id} className="border-b border-white/5 last:border-0 hover:bg-white/5 transition-colors">
+                  <tr key={sub.id} className="border-b border-border/50 last:border-0 hover:bg-muted/40 transition-colors">
                     <td className="py-4 pr-4">
-                      <div className="font-semibold text-white">{sub.student_name}</div>
+                      <div className="font-bold text-foreground text-sm">{sub.student_name}</div>
                       <div className="text-xs text-muted-foreground">{sub.student_email}</div>
                     </td>
-                    <td className="py-4 px-3 text-sm text-gray-300 font-mono">{sub.registration_number}</td>
+                    <td className="py-4 px-3 text-xs text-foreground font-mono font-medium">{sub.registration_number}</td>
                     <td className="py-4 px-3">
-                      <div className="font-medium text-white truncate max-w-[180px]">{sub.assignment_title || sub.file_name}</div>
-                      <div className="text-xs text-muted-foreground">{sub.upload_time}</div>
+                      <div className="font-semibold text-foreground text-xs truncate max-w-[180px]">{sub.assignment_title || sub.file_name}</div>
+                      <div className="text-[11px] text-muted-foreground mt-0.5">{sub.upload_time}</div>
                     </td>
                     <td className="py-4 px-3">
-                      <span className="px-2 py-1 rounded bg-white/5 text-xs text-gray-300 border border-white/10 font-medium">
+                      <span className="px-2 py-0.5 rounded-full bg-muted text-xs text-foreground border border-border font-semibold">
                         {sub.section_name}
                       </span>
                     </td>
                     <td className="py-4 px-3">
                       <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold border ${
                         sub.similarity_score >= 90
-                          ? 'bg-red-500/10 text-red-400 border-red-500/30'
+                          ? 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/30'
                           : sub.similarity_score >= 60
-                          ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30'
-                          : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                          ? 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400 border-yellow-500/30'
+                          : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
                       }`}>
                         {sub.similarity_score?.toFixed(0)}%
                       </span>
                     </td>
                     <td className="py-4 px-3">
-                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${
+                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border ${
                         sub.evaluation_status === 'Evaluation Completed'
-                          ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                          ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
                           : sub.evaluation_status === 'Under Review'
-                          ? 'bg-blue-500/10 text-blue-400 border-blue-500/30'
+                          ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30'
                           : sub.evaluation_status === 'Requires Further Review'
-                          ? 'bg-red-500/10 text-red-400 border-red-500/30'
-                          : 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30'
+                          ? 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/30'
+                          : 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400 border-yellow-500/30'
                       }`}>
                         {sub.evaluation_status}
                       </span>
                     </td>
                     <td className="py-4 px-3 text-sm">
                       {sub.marks !== null && sub.marks !== undefined ? (
-                        <span className="font-bold text-emerald-400">{sub.marks} / {sub.max_marks || 100}</span>
+                        <span className="font-extrabold text-emerald-600 dark:text-emerald-400">{sub.marks} / {sub.max_marks || 100}</span>
                       ) : (
-                        <span className="text-gray-500 text-xs font-medium">Ungraded</span>
+                        <span className="text-muted-foreground text-xs font-medium">Ungraded</span>
                       )}
                     </td>
                     <td className="py-4 pl-3 text-right space-x-2">
                       <button
                         onClick={() => setCompareUploadId(sub.id)}
-                        className="px-3 py-1.5 bg-primary/20 hover:bg-primary/30 text-primary text-xs rounded-lg font-medium transition-colors border border-primary/30 inline-flex items-center"
-                        title="View Plagiarism Report & Heatmap"
+                        className="px-3 py-1.5 bg-primary/10 hover:bg-primary/20 text-primary text-xs rounded-xl font-bold transition-colors border border-primary/20 inline-flex items-center shadow-sm"
+                        title="View Plagiarism Report & 14 Metric Cards"
                       >
                         <Eye className="w-3.5 h-3.5 mr-1" /> Compare
                       </button>
                       <button
                         onClick={() => openGradingModal(sub)}
-                        className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-white text-xs rounded-lg font-medium transition-colors border border-white/10 inline-flex items-center"
+                        className="px-3 py-1.5 bg-muted hover:bg-muted/80 text-foreground text-xs rounded-xl font-semibold transition-colors border border-border inline-flex items-center shadow-sm"
                         title="Record Academic Evaluation"
                       >
-                        <Edit3 className="w-3.5 h-3.5 mr-1 text-emerald-400" /> Grade
+                        <Edit3 className="w-3.5 h-3.5 mr-1 text-emerald-500" /> Grade
                       </button>
                     </td>
                   </tr>
                 ))
               ) : (
                 <tr>
-                  <td colSpan={8} className="py-12 text-center text-muted-foreground">
+                  <td colSpan={8} className="py-12 text-center text-muted-foreground text-sm">
                     No submissions found matching your filters.
                   </td>
                 </tr>
@@ -308,67 +362,78 @@ export default function EvaluatorDashboard() {
           </table>
         </div>
       </div>
+      </>
+      )}
 
-      {/* Grading / Evaluation Modal */}
+      {/* Create Assignment Modal */}
+      <CreateAssignmentModal
+        isOpen={isCreateModalOpen}
+        onClose={() => setIsCreateModalOpen(false)}
+        onSuccess={() => {
+          setRefreshAssignmentsTrigger((prev) => prev + 1);
+          fetchData();
+        }}
+        token={token}
+      />
       {gradingUpload && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="bg-card w-full max-w-lg p-6 rounded-2xl border border-white/10 space-y-6 shadow-2xl">
-            <div className="flex items-center justify-between pb-3 border-b border-white/10">
-              <h3 className="text-xl font-bold text-white flex items-center">
-                <Edit3 className="w-5 h-5 mr-2 text-emerald-400" /> Academic Evaluation
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-md">
+          <div className="bg-card w-full max-w-lg p-6 rounded-2xl border border-border space-y-6 shadow-2xl text-foreground">
+            <div className="flex items-center justify-between pb-3 border-b border-border">
+              <h3 className="text-lg font-bold text-foreground flex items-center">
+                <Edit3 className="w-5 h-5 mr-2 text-emerald-500" /> Academic Evaluation
               </h3>
               <button 
                 onClick={() => setGradingUpload(null)}
-                className="text-gray-400 hover:text-white text-sm"
+                className="text-muted-foreground hover:text-foreground text-sm p-1 rounded-lg"
               >
                 ✕
               </button>
             </div>
 
-            <div className="p-3 bg-white/5 rounded-xl border border-white/10 text-xs space-y-1">
-              <div>Student: <span className="text-white font-medium">{gradingUpload.student_name}</span> ({gradingUpload.registration_number})</div>
-              <div>Assignment: <span className="text-white font-medium">{gradingUpload.assignment_title || gradingUpload.file_name}</span></div>
-              <div>Section: <span className="text-primary-300 font-medium">{gradingUpload.section_name}</span></div>
-              <div>Plagiarism Similarity: <span className="text-yellow-400 font-bold">{gradingUpload.similarity_score?.toFixed(0)}%</span></div>
+            <div className="p-4 bg-muted/30 rounded-xl border border-border text-xs space-y-1.5">
+              <div>Student: <span className="text-foreground font-bold">{gradingUpload.student_name}</span> ({gradingUpload.registration_number})</div>
+              <div>Assignment: <span className="text-foreground font-medium">{gradingUpload.assignment_title || gradingUpload.file_name}</span></div>
+              <div>Section: <span className="text-primary font-bold">{gradingUpload.section_name}</span></div>
+              <div>Plagiarism Similarity: <span className="text-amber-500 font-extrabold">{gradingUpload.similarity_score?.toFixed(0)}%</span></div>
             </div>
 
             {evalSuccess && (
-              <div className="p-3 bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-sm rounded-lg flex items-center">
+              <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 text-emerald-600 dark:text-emerald-400 text-xs font-semibold rounded-xl flex items-center">
                 <CheckCircle className="w-4 h-4 mr-2" /> {evalSuccess}
               </div>
             )}
 
-            <form onSubmit={handleSaveEvaluation} className="space-y-4">
+            <form onSubmit={handleSaveEvaluation} className="space-y-4 text-xs">
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold uppercase text-muted-foreground mb-1">Marks Awarded</label>
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Marks Awarded</label>
                   <input 
                     type="number"
                     step="0.5"
                     min="0"
                     max="100"
                     placeholder="e.g. 85.5"
-                    className="w-full px-3 py-2 bg-black/50 border border-white/10 rounded-lg text-white font-bold focus:border-primary outline-none"
+                    className="w-full px-3 py-2 bg-muted/40 border border-border rounded-xl text-foreground font-bold focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all"
                     value={marks}
                     onChange={(e) => setMarks(e.target.value)}
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold uppercase text-muted-foreground mb-1">Max Marks</label>
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Max Marks</label>
                   <input 
                     type="number"
                     disabled
-                    className="w-full px-3 py-2 bg-black/20 border border-white/5 rounded-lg text-gray-400"
+                    className="w-full px-3 py-2 bg-muted/20 border border-border rounded-xl text-muted-foreground font-bold"
                     value={maxMarks}
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs font-semibold uppercase text-muted-foreground mb-1">Review Status</label>
+                <label className="block text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Review Status</label>
                 <select
-                  className="w-full px-3 py-2 bg-black/50 border border-white/10 rounded-lg text-white focus:border-primary outline-none text-sm"
+                  className="w-full px-3 py-2 bg-muted/40 border border-border rounded-xl text-foreground focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all"
                   value={evalStatus}
                   onChange={(e) => setEvalStatus(e.target.value)}
                 >
@@ -380,9 +445,9 @@ export default function EvaluatorDashboard() {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold uppercase text-muted-foreground mb-1">Academic Decision</label>
+                <label className="block text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Academic Decision</label>
                 <select
-                  className="w-full px-3 py-2 bg-black/50 border border-white/10 rounded-lg text-white focus:border-primary outline-none text-sm"
+                  className="w-full px-3 py-2 bg-muted/40 border border-border rounded-xl text-foreground focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all"
                   value={decision}
                   onChange={(e) => setDecision(e.target.value)}
                 >
@@ -393,30 +458,30 @@ export default function EvaluatorDashboard() {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold uppercase text-muted-foreground mb-1">Evaluator Feedback / Comments</label>
+                <label className="block text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Evaluator Feedback / Comments</label>
                 <textarea 
                   rows={4}
                   placeholder="Provide constructive feedback for the student..."
-                  className="w-full px-3 py-2 bg-black/50 border border-white/10 rounded-lg text-white text-sm focus:border-primary outline-none resize-none"
+                  className="w-full px-3 py-2 bg-muted/40 border border-border rounded-xl text-foreground focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none resize-none transition-all"
                   value={comments}
                   onChange={(e) => setComments(e.target.value)}
                 />
               </div>
 
-              <div className="flex justify-end space-x-3 pt-3 border-t border-white/10">
+              <div className="flex justify-end space-x-3 pt-3 border-t border-border">
                 <button
                   type="button"
                   onClick={() => setGradingUpload(null)}
-                  className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg text-sm transition-colors"
+                  className="px-4 py-2 bg-muted hover:bg-muted/80 text-foreground font-semibold rounded-xl text-xs border border-border transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={savingEval}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-semibold transition-colors flex items-center shadow-lg shadow-emerald-600/30"
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all flex items-center shadow-md disabled:opacity-50"
                 >
-                  {savingEval ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <CheckCircle className="w-4 h-4 mr-2" />}
+                  {savingEval ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" /> : <CheckCircle className="w-3.5 h-3.5 mr-1.5" />}
                   Save Evaluation
                 </button>
               </div>

@@ -39,34 +39,36 @@ export default function Settings() {
 
   return (
     <div className="container mx-auto px-4 py-12 max-w-2xl">
-      <h1 className="text-3xl font-bold mb-8 flex items-center"><KeyRound className="w-8 h-8 mr-3 text-primary" /> Account Settings</h1>
+      <h1 className="text-2xl sm:text-3xl font-extrabold mb-8 flex items-center text-foreground">
+        <KeyRound className="w-7 h-7 mr-3 text-primary" /> Account Settings
+      </h1>
       
-      <div className="p-8 rounded-2xl bg-card/40 border border-white/10">
-        <h3 className="text-xl font-semibold mb-6">Change Password</h3>
+      <div className="p-8 rounded-2xl bg-card border border-border shadow-sm">
+        <h3 className="text-lg font-bold mb-6 text-foreground">Change Password</h3>
         
         {message.text && (
-          <div className={`p-4 mb-6 rounded-lg text-sm font-medium border ${message.type === 'success' ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50' : 'bg-red-500/20 text-red-400 border-red-500/50'}`}>
+          <div className={`p-4 mb-6 rounded-xl text-xs font-semibold border ${message.type === 'success' ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30' : 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/30'}`}>
             {message.text}
           </div>
         )}
 
-        <form onSubmit={handleChangePassword} className="space-y-4">
+        <form onSubmit={handleChangePassword} className="space-y-4 text-xs">
           <div>
-            <label className="block text-sm font-medium text-gray-300">Current Password</label>
+            <label className="block text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Current Password</label>
             <input 
               type="password" 
               required 
-              className="mt-1 block w-full px-4 py-2 bg-black/50 border border-white/10 rounded-md text-white focus:ring-primary focus:border-primary outline-none transition-colors"
+              className="w-full px-3 py-2.5 bg-muted/40 border border-border rounded-xl text-foreground focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all"
               value={oldPassword}
               onChange={(e) => setOldPassword(e.target.value)}
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-300">New Password</label>
+            <label className="block text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-1">New Password</label>
             <input 
               type="password" 
               required 
-              className="mt-1 block w-full px-4 py-2 bg-black/50 border border-white/10 rounded-md text-white focus:ring-primary focus:border-primary outline-none transition-colors"
+              className="w-full px-3 py-2.5 bg-muted/40 border border-border rounded-xl text-foreground focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all"
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
             />
@@ -74,9 +76,9 @@ export default function Settings() {
           <button 
             type="submit" 
             disabled={loading}
-            className="w-full flex justify-center items-center py-2 px-4 mt-6 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-primary hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary disabled:opacity-50 transition-all"
+            className="w-full flex justify-center items-center py-2.5 px-4 mt-6 rounded-xl shadow-md text-xs font-bold text-primary-foreground bg-primary hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 transition-all"
           >
-            {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <><Save className="w-4 h-4 mr-2" /> Update Password</>}
+            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Save className="w-4 h-4 mr-2" /> Update Password</>}
           </button>
         </form>
       </div>
