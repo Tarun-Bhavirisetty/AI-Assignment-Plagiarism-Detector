@@ -360,6 +360,7 @@ export default function DuplicateCompareModal({ uploadId, onClose }: DuplicateCo
                               {data.detection_method === 'exact_hash' ? 'Binary Hash Match' :
                                data.detection_method === 'exact_content' ? 'Normalized Content Match' :
                                data.detection_method === 'hybrid_st_tfidf' ? 'Hybrid AI (Transformer + TF-IDF)' :
+                               data.detection_method === 'clean_verified' ? 'Verified Clean (Original)' :
                                data.detection_method === 'fallback_tfidf' ? 'Lexical TF-IDF' :
                                data.detection_method}
                             </span>
@@ -889,10 +890,10 @@ export default function DuplicateCompareModal({ uploadId, onClose }: DuplicateCo
                           {data.uploaded_document?.file_name?.toLowerCase().endsWith('.pdf') || data.uploaded_file?.toLowerCase().endsWith('.pdf') ? (
                             !data.reference_upload_id || !data.reference_document?.file_name ? (
                               <div className="flex flex-col h-full items-center justify-center text-muted-foreground space-y-2 p-6 text-center">
-                                <AlertTriangle className="w-10 h-10 text-amber-500" />
-                                <p className="text-sm font-semibold text-foreground">No Reference Document Matched</p>
-                                <p className="text-xs max-w-xs">
-                                  This submission was not matched to any reference document during similarity detection.
+                                <CheckCircle className="w-10 h-10 text-emerald-500" />
+                                <p className="text-sm font-bold text-foreground">Verified Independent Submission</p>
+                                <p className="text-xs max-w-xs text-muted-foreground">
+                                  No matching peer reference document was detected in the repository. All content is verified clean and original.
                                 </p>
                               </div>
                             ) : matchedPdfUrl === "missing" ? (
@@ -909,9 +910,12 @@ export default function DuplicateCompareModal({ uploadId, onClose }: DuplicateCo
                             )
                           ) : (
                             !data.reference_document?.file_name ? (
-                              <div className="flex flex-col h-full items-center justify-center text-muted-foreground space-y-2">
-                                <AlertTriangle className="w-10 h-10 text-amber-500" />
-                                <p className="text-sm font-semibold text-foreground">No Reference Document Found</p>
+                              <div className="flex flex-col h-full items-center justify-center text-muted-foreground space-y-2 p-6 text-center">
+                                <CheckCircle className="w-10 h-10 text-emerald-500" />
+                                <p className="text-sm font-bold text-foreground">Verified Independent Submission</p>
+                                <p className="text-xs max-w-xs text-muted-foreground">
+                                  No matching peer reference document was detected in the repository.
+                                </p>
                               </div>
                             ) : (
                               <div className="bg-card border border-border p-6 rounded-xl h-full overflow-y-auto text-sm leading-relaxed text-foreground whitespace-pre-wrap">

@@ -35,7 +35,20 @@ import {
   Clock,
   BarChart3,
   GitBranch,
+  HardDrive,
+  ShieldAlert,
+  Archive,
 } from "lucide-react";
+import {
+  DeleteSingleSubmissionModal,
+  BulkDeleteSubmissionsModal,
+  DeleteAllSubmissionsModal,
+} from "@/components/DeleteSubmissionDialogs";
+import {
+  DeleteSingleUserModal,
+  BulkDeleteUsersModal,
+  DeleteAllUsersModal,
+} from "@/components/DeleteUserDialogs";
 
 export default function Dashboard() {
   const router = useRouter();
@@ -58,6 +71,38 @@ export default function Dashboard() {
   const [filterSection, setFilterSection] = useState("");
   const [filterAssignment, setFilterAssignment] = useState("");
 
+  // Current Authenticated Admin
+  const [currentUser, setCurrentUser] = useState<any>(null);
+
+  // Storage Stats State
+  const [storageStats, setStorageStats] = useState<{
+    total_submissions: number;
+    total_storage_mb: number;
+    total_storage_bytes: number;
+    orphaned_files_count: number;
+    orphaned_files_mb: number;
+    orphaned_files_bytes: number;
+  } | null>(null);
+
+  // Submission Selection & Deletion State
+  const [selectedUploadIds, setSelectedUploadIds] = useState<number[]>([]);
+  const [submissionToDelete, setSubmissionToDelete] = useState<any | null>(null);
+  const [isBulkDeleteSubmissionsOpen, setIsBulkDeleteSubmissionsOpen] = useState(false);
+  const [isDeleteAllSubmissionsOpen, setIsDeleteAllSubmissionsOpen] = useState(false);
+
+  // User Selection, Search, Filtering & Deletion State
+  const [selectedUserIds, setSelectedUserIds] = useState<number[]>([]);
+  const [userToDelete, setUserToDelete] = useState<any | null>(null);
+  const [isBulkDeleteUsersOpen, setIsBulkDeleteUsersOpen] = useState(false);
+  const [isDeleteAllUsersOpen, setIsDeleteAllUsersOpen] = useState(false);
+  const [userSearchQuery, setUserSearchQuery] = useState("");
+  const [userFilterDept, setUserFilterDept] = useState("");
+  const [userFilterVerification, setUserFilterVerification] = useState("all");
+
+  // Security Audit Trail State
+  const [auditLogs, setAuditLogs] = useState<any[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+
   // Three-Tier Roles & Users State
   const [users, setUsers] = useState<any[]>([]);
   const [evaluators, setEvaluators] = useState<any[]>([]);
@@ -76,6 +121,7 @@ export default function Dashboard() {
     assignments: true,
     allocation: false,
     analytics: false,
+    audit: false,
   });
 
   const togglePanel = (panel: string) => {
@@ -127,6 +173,27 @@ export default function Dashboard() {
     }
   };
 
+  const fetchStorageStats = async () => {
+    try {
+      const res = await api.get("/admin/storage-stats");
+      setStorageStats(res.data);
+    } catch (err) {
+      console.error("Storage stats error:", err);
+    }
+  };
+
+  const fetchAuditLogs = async () => {
+    setAuditLoading(true);
+    try {
+      const res = await api.get("/admin/audit-logs?limit=50");
+      setAuditLogs(res.data);
+    } catch (err) {
+      console.error("Audit logs error:", err);
+    } finally {
+      setAuditLoading(false);
+    }
+  };
+
   const fetchAnalytics = async () => {
     try {
       const res = await api.get("/analytics");
@@ -152,12 +219,22 @@ export default function Dashboard() {
     } else if (role !== "admin") {
       router.push("/user-dashboard");
     } else {
+      const storedUser = localStorage.getItem("user");
+      if (storedUser) {
+        try {
+          setCurrentUser(JSON.parse(storedUser));
+        } catch (e) {
+          console.error(e);
+        }
+      }
       fetchAnalytics();
       fetchSections();
       fetchUploads();
       fetchUsers();
       fetchEvaluators();
       fetchAssignments();
+      fetchStorageStats();
+      fetchAuditLogs();
     }
   }, [router]);
 
@@ -309,13 +386,63 @@ export default function Dashboard() {
     });
   }, [sections, allUploads, users]);
 
+  // Unique departments for filter
+  const userDepartments = useMemo(() => {
+    const depts = new Set<string>();
+    users.forEach((u) => {
+      if (u.department) depts.add(u.department);
+    });
+    return Array.from(depts);
+  }, [users]);
+
   // Filtered Users
   const filteredUsers = useMemo(() => {
-    if (selectedRoleFilter === "all") return users;
-    return users.filter(
-      (u) => (u.role || "").toLowerCase() === selectedRoleFilter.toLowerCase()
-    );
-  }, [users, selectedRoleFilter]);
+    return users.filter((u) => {
+      // Role filter
+      if (
+        selectedRoleFilter !== "all" &&
+        (u.role || "").toLowerCase() !== selectedRoleFilter.toLowerCase()
+      ) {
+        return false;
+      }
+      // Text search
+      if (userSearchQuery.trim()) {
+        const q = userSearchQuery.toLowerCase().trim();
+        const matchName = u.name?.toLowerCase().includes(q);
+        const matchEmail = u.email?.toLowerCase().includes(q);
+        const matchReg = u.registration_number?.toLowerCase().includes(q);
+        if (!matchName && !matchEmail && !matchReg) return false;
+      }
+      // Department filter
+      if (
+        userFilterDept &&
+        (u.department || "Computer Science") !== userFilterDept
+      ) {
+        return false;
+      }
+      // Verification filter
+      if (userFilterVerification === "verified" && !u.is_verified) return false;
+      if (userFilterVerification === "pending" && u.is_verified) return false;
+
+      return true;
+    });
+  }, [
+    users,
+    selectedRoleFilter,
+    userSearchQuery,
+    userFilterDept,
+    userFilterVerification,
+  ]);
+
+  // Selected Uploads Size
+  const selectedUploadsSizeFormatted = useMemo(() => {
+    const bytes = allUploads
+      .filter((u) => selectedUploadIds.includes(u.id))
+      .reduce((acc, u) => acc + (u.file_size_bytes || 0), 0);
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  }, [allUploads, selectedUploadIds]);
 
   // Filtered Uploads
   const filteredUploads = useMemo(() => {
@@ -413,9 +540,22 @@ export default function Dashboard() {
               </p>
             </div>
           </div>
-          <button className="p-1.5 rounded-lg hover:bg-muted text-muted-foreground">
-            {openPanels.users ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
-          </button>
+          <div className="flex items-center gap-2.5">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsDeleteAllUsersOpen(true);
+              }}
+              className="px-3 py-1.5 rounded-xl bg-destructive/10 hover:bg-destructive/20 text-destructive text-xs font-bold border border-destructive/20 transition flex items-center gap-1.5 shadow-sm"
+              title="High-risk: Purge user accounts with academic preservation"
+            >
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>Delete All Users</span>
+            </button>
+            <button className="p-1.5 rounded-lg hover:bg-muted text-muted-foreground">
+              {openPanels.users ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
+            </button>
+          </div>
         </div>
 
         {openPanels.users && (
@@ -458,6 +598,45 @@ export default function Dashboard() {
               })}
             </div>
 
+            {/* Search and Filters for Users */}
+            <div className="flex flex-col md:flex-row gap-3 pt-1">
+              <div className="flex-1 relative">
+                <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                <input
+                  type="text"
+                  placeholder="Search users by name, email, or registration number..."
+                  value={userSearchQuery}
+                  onChange={(e) => setUserSearchQuery(e.target.value)}
+                  className="w-full pl-9 pr-4 py-2 bg-card border border-border rounded-xl text-xs text-foreground outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition"
+                />
+              </div>
+
+              <div className="flex gap-2 flex-wrap">
+                <select
+                  value={userFilterDept}
+                  onChange={(e) => setUserFilterDept(e.target.value)}
+                  className="px-3 py-2 bg-card border border-border rounded-xl text-xs text-foreground outline-none min-w-[140px]"
+                >
+                  <option value="">All Departments</option>
+                  {userDepartments.map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
+
+                <select
+                  value={userFilterVerification}
+                  onChange={(e) => setUserFilterVerification(e.target.value)}
+                  className="px-3 py-2 bg-card border border-border rounded-xl text-xs text-foreground outline-none min-w-[130px]"
+                >
+                  <option value="all">All Status</option>
+                  <option value="verified">Verified Only</option>
+                  <option value="pending">Pending Verification</option>
+                </select>
+              </div>
+            </div>
+
             {/* Filter Pill */}
             <div className="flex items-center justify-between text-xs text-muted-foreground pb-1">
               <span>
@@ -468,21 +647,81 @@ export default function Dashboard() {
                   </span>
                 )}
               </span>
-              {selectedRoleFilter !== "all" && (
-                <button
-                  onClick={() => setSelectedRoleFilter("all")}
-                  className="text-primary hover:underline font-semibold text-xs"
-                >
-                  Clear role filter
-                </button>
-              )}
+              <div className="flex items-center gap-3">
+                {(selectedRoleFilter !== "all" || userSearchQuery || userFilterDept || userFilterVerification !== "all") && (
+                  <button
+                    onClick={() => {
+                      setSelectedRoleFilter("all");
+                      setUserSearchQuery("");
+                      setUserFilterDept("");
+                      setUserFilterVerification("all");
+                    }}
+                    className="text-primary hover:underline font-semibold text-xs"
+                  >
+                    Reset all filters
+                  </button>
+                )}
+              </div>
             </div>
+
+            {/* Bulk Selection Banner for Users */}
+            {selectedUserIds.length > 0 && (
+              <div className="p-3 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-between gap-3 text-xs animate-in fade-in duration-150">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-primary">
+                    {selectedUserIds.length} user{selectedUserIds.length > 1 ? "s" : ""} selected
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setSelectedUserIds([])}
+                    className="px-2.5 py-1 rounded-lg bg-card border border-border hover:bg-muted text-xs font-semibold text-foreground transition"
+                  >
+                    Clear Selection
+                  </button>
+                  <button
+                    onClick={() => setIsBulkDeleteUsersOpen(true)}
+                    className="px-3 py-1 rounded-lg bg-destructive hover:bg-destructive/90 text-destructive-foreground text-xs font-bold transition flex items-center gap-1.5 shadow"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete Selected Users ({selectedUserIds.length})</span>
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Users Table */}
             <div className="overflow-x-auto rounded-xl border border-border">
               <table className="w-full text-left border-collapse text-xs">
                 <thead className="bg-muted/40 border-b border-border text-muted-foreground text-[11px] uppercase font-bold tracking-wider">
                   <tr>
+                    <th className="py-3 px-3 w-10 text-center">
+                      <input
+                        type="checkbox"
+                        aria-label="Select all eligible users"
+                        checked={
+                          filteredUsers.filter((u) => u.id !== currentUser?.id).length > 0 &&
+                          filteredUsers
+                            .filter((u) => u.id !== currentUser?.id)
+                            .every((u) => selectedUserIds.includes(u.id))
+                        }
+                        onChange={(e) => {
+                          const eligible = filteredUsers
+                            .filter((u) => u.id !== currentUser?.id)
+                            .map((u) => u.id);
+                          if (e.target.checked) {
+                            setSelectedUserIds((prev) =>
+                              Array.from(new Set([...prev, ...eligible]))
+                            );
+                          } else {
+                            setSelectedUserIds((prev) =>
+                              prev.filter((id) => !eligible.includes(id))
+                            );
+                          }
+                        }}
+                        className="rounded border-border text-primary focus:ring-primary/20 cursor-pointer"
+                      />
+                    </th>
                     <th className="py-3 px-4 font-semibold">User</th>
                     <th className="py-3 px-3 font-semibold">Reg / Emp No</th>
                     <th className="py-3 px-3 font-semibold">Department & Section</th>
@@ -492,71 +731,123 @@ export default function Dashboard() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {filteredUsers.map((u: any) => (
-                    <tr key={u.id} className="hover:bg-muted/30 transition-colors">
-                      <td className="py-3 px-4">
-                        <div className="font-bold text-foreground text-sm">{u.name}</div>
-                        <div className="text-xs text-muted-foreground">{u.email}</div>
-                      </td>
-                      <td className="py-3 px-3 font-mono text-foreground">
-                        {u.registration_number || "—"}
-                      </td>
-                      <td className="py-3 px-3 text-muted-foreground">
-                        <div>{u.department || "Computer Science"}</div>
-                        {u.section_name && (
-                          <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-muted text-foreground border border-border mt-0.5">
-                            {u.section_name}
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-3 px-3">
-                        {u.is_verified ? (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                            Verified
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
-                            Pending
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-3 px-3">
-                        <select
-                          defaultValue={u.role}
-                          id={`role-select-${u.id}`}
-                          className="px-2.5 py-1.5 bg-card border border-border rounded-xl text-xs text-foreground focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition capitalize"
-                        >
-                          <option value="student">Student</option>
-                          <option value="faculty">Faculty</option>
-                          <option value="evaluator">Evaluator</option>
-                          <option value="hod">HOD</option>
-                          <option value="admin">Administrator</option>
-                        </select>
-                      </td>
-                      <td className="py-3 pr-4 text-right">
-                        <button
-                          onClick={() => {
-                            const sel = document.getElementById(
-                              `role-select-${u.id}`
-                            ) as HTMLSelectElement;
-                            if (sel)
-                              handleUpdateUserRole(
-                                u.id,
-                                sel.value,
-                                u.department || "Computer Science"
-                              );
-                          }}
-                          disabled={roleUpdatingId === u.id}
-                          className="px-3 py-1.5 bg-primary/10 hover:bg-primary/20 text-primary text-xs font-bold rounded-xl border border-primary/20 transition shadow-sm disabled:opacity-50"
-                        >
-                          {roleUpdatingId === u.id ? "Saving..." : "Update"}
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {filteredUsers.map((u: any) => {
+                    const isSelf = u.id === currentUser?.id;
+                    return (
+                      <tr key={u.id} className="hover:bg-muted/30 transition-colors">
+                        <td className="py-3 px-3 text-center">
+                          {isSelf ? (
+                            <span
+                              title="Your account (Protected Admin)"
+                              className="text-muted-foreground/40 cursor-not-allowed"
+                            >
+                              <Shield className="w-4 h-4 mx-auto text-primary/40" />
+                            </span>
+                          ) : (
+                            <input
+                              type="checkbox"
+                              aria-label={`Select user ${u.name}`}
+                              checked={selectedUserIds.includes(u.id)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedUserIds((prev) => [...prev, u.id]);
+                                } else {
+                                  setSelectedUserIds((prev) =>
+                                    prev.filter((id) => id !== u.id)
+                                  );
+                                }
+                              }}
+                              className="rounded border-border text-primary focus:ring-primary/20 cursor-pointer"
+                            />
+                          )}
+                        </td>
+                        <td className="py-3 px-4">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-bold text-foreground text-sm">
+                              {u.name}
+                            </span>
+                            {isSelf && (
+                              <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-primary/10 text-primary border border-primary/20">
+                                You (Active Admin)
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-muted-foreground">{u.email}</div>
+                        </td>
+                        <td className="py-3 px-3 font-mono text-foreground">
+                          {u.registration_number || "—"}
+                        </td>
+                        <td className="py-3 px-3 text-muted-foreground">
+                          <div>{u.department || "Computer Science"}</div>
+                          {u.section_name && (
+                            <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-muted text-foreground border border-border mt-0.5">
+                              {u.section_name}
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 px-3">
+                          {u.is_verified ? (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                              Verified
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                              Pending
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 px-3">
+                          <select
+                            defaultValue={u.role}
+                            id={`role-select-${u.id}`}
+                            className="px-2.5 py-1.5 bg-card border border-border rounded-xl text-xs text-foreground focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition capitalize"
+                          >
+                            <option value="student">Student</option>
+                            <option value="faculty">Faculty</option>
+                            <option value="evaluator">Evaluator</option>
+                            <option value="hod">HOD</option>
+                            <option value="admin">Administrator</option>
+                          </select>
+                        </td>
+                        <td className="py-3 pr-4 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              onClick={() => {
+                                const sel = document.getElementById(
+                                  `role-select-${u.id}`
+                                ) as HTMLSelectElement;
+                                if (sel)
+                                  handleUpdateUserRole(
+                                    u.id,
+                                    sel.value,
+                                    u.department || "Computer Science"
+                                  );
+                              }}
+                              disabled={roleUpdatingId === u.id}
+                              className="px-2.5 py-1.5 bg-primary/10 hover:bg-primary/20 text-primary text-xs font-bold rounded-xl border border-primary/20 transition shadow-sm disabled:opacity-50"
+                            >
+                              {roleUpdatingId === u.id ? "Saving..." : "Update"}
+                            </button>
+                            <button
+                              onClick={() => setUserToDelete(u)}
+                              disabled={isSelf}
+                              className="p-1.5 bg-destructive/10 hover:bg-destructive/20 text-destructive rounded-xl border border-destructive/20 transition disabled:opacity-30 disabled:cursor-not-allowed shadow-sm"
+                              title={
+                                isSelf
+                                  ? "Self-deletion prohibited"
+                                  : "Delete / Archive user account"
+                              }
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                   {filteredUsers.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="py-8 text-center text-muted-foreground">
+                      <td colSpan={7} className="py-8 text-center text-muted-foreground">
                         No users found in this role category.
                       </td>
                     </tr>
@@ -589,9 +880,42 @@ export default function Dashboard() {
               </p>
             </div>
           </div>
-          <button className="p-1.5 rounded-lg hover:bg-muted text-muted-foreground">
-            {openPanels.submissions ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
-          </button>
+          <div className="flex items-center gap-2.5">
+            {storageStats && (
+              <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-muted/60 border border-border text-xs text-muted-foreground">
+                <HardDrive className="w-4 h-4 text-primary shrink-0" />
+                <span>
+                  Files: <strong className="text-foreground">{storageStats.total_submissions}</strong>
+                </span>
+                <span className="text-border">|</span>
+                <span>
+                  Storage: <strong className="text-foreground">{storageStats.total_storage_mb.toFixed(2)} MB</strong>
+                </span>
+                {storageStats.orphaned_files_count > 0 && (
+                  <>
+                    <span className="text-border">|</span>
+                    <span className="text-amber-500 font-semibold">
+                      {storageStats.orphaned_files_count} orphaned ({storageStats.orphaned_files_mb.toFixed(2)} MB)
+                    </span>
+                  </>
+                )}
+              </div>
+            )}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsDeleteAllSubmissionsOpen(true);
+              }}
+              className="px-3 py-1.5 rounded-xl bg-destructive/10 hover:bg-destructive/20 text-destructive text-xs font-bold border border-destructive/20 transition flex items-center gap-1.5 shadow-sm"
+              title="Purge all submissions from storage and database"
+            >
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>Delete All Submissions</span>
+            </button>
+            <button className="p-1.5 rounded-lg hover:bg-muted text-muted-foreground">
+              {openPanels.submissions ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
+            </button>
+          </div>
         </div>
 
         {openPanels.submissions && (
@@ -705,16 +1029,68 @@ export default function Dashboard() {
               </div>
             </div>
 
+            {/* Bulk Selection Banner for Submissions */}
+            {selectedUploadIds.length > 0 && (
+              <div className="p-3 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-between gap-3 text-xs animate-in fade-in duration-150">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-primary">
+                    {selectedUploadIds.length} submission{selectedUploadIds.length > 1 ? "s" : ""} selected
+                  </span>
+                  <span className="text-muted-foreground font-mono">
+                    ({selectedUploadsSizeFormatted} disk space)
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setSelectedUploadIds([])}
+                    className="px-2.5 py-1 rounded-lg bg-card border border-border hover:bg-muted text-xs font-semibold text-foreground transition"
+                  >
+                    Clear Selection
+                  </button>
+                  <button
+                    onClick={() => setIsBulkDeleteSubmissionsOpen(true)}
+                    className="px-3 py-1 rounded-lg bg-destructive hover:bg-destructive/90 text-destructive-foreground text-xs font-bold transition flex items-center gap-1.5 shadow"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete Selected ({selectedUploadIds.length})</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Submissions Table */}
             <div className="overflow-x-auto rounded-xl border border-border">
               <table className="w-full text-left text-xs whitespace-nowrap">
                 <thead className="bg-muted/40 border-b border-border text-muted-foreground uppercase tracking-wider font-bold text-[11px]">
                   <tr>
+                    <th className="px-3 py-3 w-10 text-center">
+                      <input
+                        type="checkbox"
+                        aria-label="Select all visible submissions"
+                        checked={
+                          filteredUploads.length > 0 &&
+                          filteredUploads.every((u) => selectedUploadIds.includes(u.id))
+                        }
+                        onChange={(e) => {
+                          const visibleIds = filteredUploads.map((u) => u.id);
+                          if (e.target.checked) {
+                            setSelectedUploadIds((prev) =>
+                              Array.from(new Set([...prev, ...visibleIds]))
+                            );
+                          } else {
+                            setSelectedUploadIds((prev) =>
+                              prev.filter((id) => !visibleIds.includes(id))
+                            );
+                          }
+                        }}
+                        className="rounded border-border text-primary focus:ring-primary/20 cursor-pointer"
+                      />
+                    </th>
                     <th className="px-5 py-3 font-semibold">Student</th>
                     <th className="px-5 py-3 font-semibold">Section</th>
                     <th className="px-5 py-3 font-semibold">Coursework</th>
                     <th className="px-5 py-3 font-semibold">File & Version</th>
-                    <th className="px-5 py-3 font-semibold">Submitted</th>
+                    <th className="px-5 py-3 font-semibold">Submitted (IST)</th>
                     <th className="px-5 py-3 font-semibold text-center">Similarity</th>
                     <th className="px-5 py-3 font-semibold text-center">Status</th>
                     <th className="px-5 py-3 font-semibold text-right">Actions</th>
@@ -729,30 +1105,61 @@ export default function Dashboard() {
                         className="hover:bg-muted/30 transition-colors group cursor-pointer"
                         onClick={() => setPreviewUpload(upload)}
                       >
+                        <td
+                          className="px-3 py-3.5 text-center"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            type="checkbox"
+                            aria-label={`Select submission ${upload.file_name}`}
+                            checked={selectedUploadIds.includes(upload.id)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedUploadIds((prev) => [...prev, upload.id]);
+                              } else {
+                                setSelectedUploadIds((prev) =>
+                                  prev.filter((id) => id !== upload.id)
+                                );
+                              }
+                            }}
+                            className="rounded border-border text-primary focus:ring-primary/20 cursor-pointer"
+                          />
+                        </td>
                         <td className="px-5 py-3.5">
-                          <div className="font-bold text-foreground">{upload.uploaded_by_name}</div>
-                          <div className="text-[11px] text-muted-foreground font-mono">{upload.registration_number || upload.uploaded_by_email}</div>
+                          <div className="font-bold text-foreground">
+                            {upload.uploaded_by_name || "N/A"}
+                          </div>
+                          <div className="text-[11px] text-muted-foreground font-mono">
+                            {upload.registration_number || upload.uploaded_by_email || "N/A"}
+                          </div>
                         </td>
                         <td className="px-5 py-3.5 text-muted-foreground font-medium">
                           <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-muted border border-border">
-                            {upload.section_name}
+                            {upload.section_name || "N/A"}
                           </span>
                         </td>
                         <td className="px-5 py-3.5 font-semibold text-primary">
-                          {upload.assignment_title}
+                          {upload.assignment_title || "N/A"}
                         </td>
                         <td className="px-5 py-3.5 text-foreground">
                           <div className="font-medium group-hover:text-primary transition-colors flex items-center gap-1.5">
-                            <span className="truncate max-w-[160px]" title={upload.file_name}>{upload.file_name}</span>
+                            <span className="truncate max-w-[160px]" title={upload.file_name}>
+                              {upload.file_name}
+                            </span>
                             {upload.version > 1 && (
                               <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-primary/10 text-primary border border-primary/20">
                                 v{upload.version}
                               </span>
                             )}
+                            {upload.file_size_formatted && (
+                              <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-muted text-muted-foreground border border-border">
+                                {upload.file_size_formatted}
+                              </span>
+                            )}
                           </div>
                         </td>
-                        <td className="px-5 py-3.5 text-muted-foreground text-[11px]">
-                          {upload.upload_time}
+                        <td className="px-5 py-3.5 text-muted-foreground text-[11px] font-mono">
+                          {upload.upload_time || "N/A"}
                         </td>
                         <td className="px-5 py-3.5 text-center">
                           <span
@@ -764,7 +1171,7 @@ export default function Dashboard() {
                                 : "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
                             }`}
                           >
-                            {sim.toFixed(1)}%
+                            {sim.toFixed(1)}% ({upload.similarity_status || "Clean"})
                           </span>
                         </td>
                         <td className="px-5 py-3.5 text-center">
@@ -811,13 +1218,23 @@ export default function Dashboard() {
                           >
                             Compare
                           </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSubmissionToDelete(upload);
+                            }}
+                            className="p-1.5 bg-destructive/10 text-destructive hover:bg-destructive/20 rounded-lg border border-destructive/20 transition shadow-sm"
+                            title="Delete submission and free storage"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
                         </td>
                       </tr>
                     );
                   })}
                   {filteredUploads.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="px-6 py-8 text-center text-muted-foreground">
+                      <td colSpan={9} className="px-6 py-8 text-center text-muted-foreground">
                         No submissions match the selected filters.
                       </td>
                     </tr>
@@ -1186,6 +1603,131 @@ export default function Dashboard() {
         )}
       </div>
 
+      {/* ========================================================================= */}
+      {/* PANEL 7: INSTITUTIONAL SECURITY & AUDIT TRAIL */}
+      {/* ========================================================================= */}
+      <div className="p-6 rounded-2xl bg-card border border-border shadow-sm space-y-6">
+        <div
+          onClick={() => togglePanel("audit")}
+          className="flex items-center justify-between cursor-pointer select-none group"
+        >
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 rounded-xl bg-rose-500/10 text-rose-500">
+              <ShieldAlert className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-lg font-bold text-foreground group-hover:text-primary transition-colors">
+                Institutional Security & Audit Trail
+              </h2>
+              <p className="text-xs text-muted-foreground">
+                Chronological record of administrator deletions, user account lifecycle changes, and storage purges.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                fetchAuditLogs();
+              }}
+              className="p-1.5 rounded-lg hover:bg-muted text-muted-foreground"
+              title="Refresh audit logs"
+            >
+              <RefreshCw className={`w-4 h-4 ${auditLoading ? "animate-spin" : ""}`} />
+            </button>
+            <button className="p-1.5 rounded-lg hover:bg-muted text-muted-foreground">
+              {openPanels.audit ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
+            </button>
+          </div>
+        </div>
+
+        {openPanels.audit && (
+          <div className="space-y-4 pt-2 animate-in fade-in-50 duration-150">
+            <div className="overflow-x-auto rounded-xl border border-border">
+              <table className="w-full text-left text-xs whitespace-nowrap">
+                <thead className="bg-muted/40 border-b border-border text-muted-foreground uppercase tracking-wider font-bold text-[11px]">
+                  <tr>
+                    <th className="px-4 py-3 font-semibold">Timestamp (IST)</th>
+                    <th className="px-4 py-3 font-semibold">Administrator</th>
+                    <th className="px-4 py-3 font-semibold">Action</th>
+                    <th className="px-4 py-3 font-semibold">Target</th>
+                    <th className="px-4 py-3 font-semibold">Operation Details</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {auditLogs.map((log) => {
+                    const actionColors: Record<string, string> = {
+                      SUBMISSION_DELETED:
+                        "bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20",
+                      BULK_SUBMISSIONS_DELETED:
+                        "bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20",
+                      ALL_SUBMISSIONS_PURGED:
+                        "bg-destructive text-destructive-foreground",
+                      USER_DELETED:
+                        "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20",
+                      BULK_USERS_DELETED:
+                        "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20",
+                      ALL_USERS_PURGED:
+                        "bg-destructive text-destructive-foreground",
+                      ROLE_UPDATED: "bg-primary/10 text-primary border-primary/20",
+                    };
+                    return (
+                      <tr key={log.id} className="hover:bg-muted/30 transition-colors">
+                        <td className="px-4 py-3 font-mono text-[11px] text-muted-foreground">
+                          {log.timestamp}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="font-semibold text-foreground">
+                            {log.admin_name}
+                          </div>
+                          <div className="text-[10px] text-muted-foreground font-mono">
+                            ID: {log.admin_id}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                              actionColors[log.action_type] ||
+                              "bg-muted text-foreground border-border"
+                            }`}
+                          >
+                            {log.action_type}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="font-medium text-foreground">
+                            {log.target_name || `ID #${log.target_id}`}
+                          </div>
+                          <div className="text-[10px] text-muted-foreground capitalize">
+                            {log.target_type}
+                          </div>
+                        </td>
+                        <td
+                          className="px-4 py-3 text-muted-foreground max-w-xs truncate"
+                          title={log.details}
+                        >
+                          {log.details}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {auditLogs.length === 0 && (
+                    <tr>
+                      <td
+                        colSpan={5}
+                        className="px-6 py-8 text-center text-muted-foreground"
+                      >
+                        No administrative actions logged yet.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Modals */}
       {selectedUploadId && (
         <DuplicateCompareModal
@@ -1209,6 +1751,88 @@ export default function Dashboard() {
           setAssignmentRefreshTrigger((prev) => prev + 1);
         }}
         token={token}
+      />
+
+      {/* Submission Deletion Modals */}
+      <DeleteSingleSubmissionModal
+        isOpen={!!submissionToDelete}
+        upload={submissionToDelete}
+        onClose={() => setSubmissionToDelete(null)}
+        onSuccess={() => {
+          fetchUploads();
+          fetchStorageStats();
+          fetchAnalytics();
+          fetchAuditLogs();
+          setSelectedUploadIds((prev) =>
+            prev.filter((id) => id !== submissionToDelete?.id)
+          );
+        }}
+      />
+
+      <BulkDeleteSubmissionsModal
+        isOpen={isBulkDeleteSubmissionsOpen}
+        selectedUploads={allUploads.filter((u) => selectedUploadIds.includes(u.id))}
+        onClose={() => setIsBulkDeleteSubmissionsOpen(false)}
+        onSuccess={() => {
+          fetchUploads();
+          fetchStorageStats();
+          fetchAnalytics();
+          fetchAuditLogs();
+          setSelectedUploadIds([]);
+        }}
+      />
+
+      <DeleteAllSubmissionsModal
+        isOpen={isDeleteAllSubmissionsOpen}
+        totalSubmissions={allUploads.length}
+        totalStorageMb={storageStats ? storageStats.total_storage_mb : 0}
+        onClose={() => setIsDeleteAllSubmissionsOpen(false)}
+        onSuccess={() => {
+          fetchUploads();
+          fetchStorageStats();
+          fetchAnalytics();
+          fetchAuditLogs();
+          setSelectedUploadIds([]);
+        }}
+      />
+
+      {/* User Deletion Modals */}
+      <DeleteSingleUserModal
+        isOpen={!!userToDelete}
+        user={userToDelete}
+        currentUserId={currentUser?.id ?? null}
+        onClose={() => setUserToDelete(null)}
+        onSuccess={() => {
+          fetchUsers();
+          fetchAuditLogs();
+          setSelectedUserIds((prev) =>
+            prev.filter((id) => id !== userToDelete?.id)
+          );
+        }}
+      />
+
+      <BulkDeleteUsersModal
+        isOpen={isBulkDeleteUsersOpen}
+        selectedUsers={users.filter((u) => selectedUserIds.includes(u.id))}
+        currentUserId={currentUser?.id ?? null}
+        onClose={() => setIsBulkDeleteUsersOpen(false)}
+        onSuccess={() => {
+          fetchUsers();
+          fetchAuditLogs();
+          setSelectedUserIds([]);
+        }}
+      />
+
+      <DeleteAllUsersModal
+        isOpen={isDeleteAllUsersOpen}
+        totalUsers={users.length}
+        currentAdminEmail={currentUser?.email || "Current Admin"}
+        onClose={() => setIsDeleteAllUsersOpen(false)}
+        onSuccess={() => {
+          fetchUsers();
+          fetchAuditLogs();
+          setSelectedUserIds([]);
+        }}
       />
     </div>
   );

@@ -3287,82 +3287,47 @@ def update_profile(data: ProfileUpdate, current_user: models.User = Depends(get_
 
 
 @router.get("/admin/users")
-
-
-
-def get_users_list(current_user: models.User = Depends(require_roles("admin", "hod")), db: Session = Depends(get_db)):
-
-
-
-    query = db.query(models.User)
-
-
+def get_users_list(
+    current_user: models.User = Depends(require_roles("admin", "hod")), 
+    db: Session = Depends(get_db)
+):
+    """
+    Roster of users for Administrator and HOD.
+    Includes active counts: submissions, created assignments, and evaluations.
+    """
+    query = db.query(models.User).filter(models.User.is_deleted == False)
 
     if normalize_role(current_user.role) == "hod":
-
-
-
         dept = current_user.department or "Computer Science"
-
-
-
         query = query.filter(models.User.department == dept)
-
-
 
     users = query.all()
 
+    results = []
+    for u in users:
+        sub_count = db.query(models.Upload).filter(
+            models.Upload.user_id == u.id,
+            models.Upload.is_deleted == False
+        ).count()
+        assign_count = db.query(models.Assignment).filter(models.Assignment.creator_id == u.id).count()
+        eval_count = db.query(models.Evaluation).filter(models.Evaluation.evaluator_id == u.id).count()
 
-
-    return [
-
-
-
-        {
-
-
-
+        results.append({
             "id": u.id,
-
-
-
             "name": u.name,
-
-
-
             "email": u.email,
-
-
-
             "role": normalize_role(u.role),
-
-
-
-            "registration_number": u.registration_number,
-
-
-
+            "registration_number": u.registration_number or "—",
             "department": u.department or "Computer Science",
+            "section_name": u.section_name or "N/A",
+            "is_verified": bool(u.is_verified),
+            "is_active": bool(getattr(u, "is_active", True)),
+            "submissions_count": sub_count,
+            "assignments_created_count": assign_count,
+            "evaluations_count": eval_count
+        })
 
-
-
-            "is_verified": bool(u.is_verified)
-
-
-
-        }
-
-
-
-        for u in users
-
-
-
-    ]
-
-
-
-
+    return results
 
 
 
@@ -4999,462 +4964,185 @@ def submit_evaluation(upload_id: int, data: EvaluationSubmit, current_user: mode
 
 
 @router.get("/compare/{upload_id}")
-
-
-
-def compare_uploads(upload_id: int, current_user: models.User = Depends(require_roles("admin", "hod", "evaluator", "faculty")), db: Session = Depends(get_db)):
-
-
-
-    upload = db.query(models.Upload).filter(models.Upload.id == upload_id).first()
-
-
-
+def compare_uploads(
+    upload_id: int, 
+    current_user: models.User = Depends(require_roles("admin", "hod", "evaluator", "faculty")), 
+    db: Session = Depends(get_db)
+):
+    """
+    Authoritative document comparison endpoint.
+    Guarantees:
+    1. An upload is NEVER compared against itself.
+    2. Only genuine historical predecessors (submitted earlier: id < upload_id) are eligible references.
+    3. Forward-in-time comparisons are strictly prohibited.
+    4. Clean / Original submissions with no eligible reference return an authoritative Clean result (0.0% similarity).
+    5. Exact 100% hash match is ONLY returned when distinct eligible upload records share identical cryptographic SHA-256 hashes.
+    """
+    upload = db.query(models.Upload).filter(
+        models.Upload.id == upload_id,
+        models.Upload.is_deleted == False
+    ).first()
     if not upload:
-
-
-
-        raise HTTPException(status_code=404, detail="Upload not found")
-
-
-
-    
-
-
+        raise HTTPException(status_code=404, detail="Upload not found or has been deleted.")
 
     user_role = normalize_role(current_user.role)
-
-
-
     if user_role == "evaluator":
-
-
-
         assigned_sections = get_evaluator_assigned_section_names(current_user.id, db)
-
-
-
         if upload.section_name not in assigned_sections:
-
-
-
             raise HTTPException(status_code=403, detail="Access denied: upload does not belong to your assigned sections")
-
-
-
     elif user_role in ["hod", "faculty"]:
-
-
-
         sec = db.query(models.Section).filter(models.Section.name == upload.section_name).first()
-
-
-
         assigned_sections = get_evaluator_assigned_section_names(current_user.id, db)
-
-
-
         is_same_dept = not (sec and sec.department and current_user.department and sec.department != current_user.department)
-
-
-
         if not is_same_dept and upload.section_name not in assigned_sections:
-
-
-
             raise HTTPException(status_code=403, detail="Access denied: upload is outside your department/assigned sections")
 
-
-
-
-
-
-
-    # ── Reference document lookup (authoritative order) ──────────────────────────
-
-
-
+    # ── Reference document lookup (Strict Directional Predecessor Order) ───────
     matched_upload = None
 
+    # Step 1: Check stored metadata for explicit reference_upload_id or matched_upload_id
+    if upload.metadata_json and isinstance(upload.metadata_json, dict):
+        cand_id = upload.metadata_json.get("matched_upload_id") or upload.metadata_json.get("reference_upload_id")
+        if cand_id:
+            try:
+                ref_cand = db.query(models.Upload).filter(
+                    models.Upload.id == int(cand_id),
+                    models.Upload.id < upload.id,
+                    models.Upload.user_id != upload.user_id,
+                    models.Upload.is_deleted == False
+                ).first()
+                if ref_cand:
+                    matched_upload = ref_cand
+            except Exception:
+                pass
 
-
-    
-
-
-
-    # 1. Best: use the stored matched_upload_id from metadata
-
-
-
-    if upload.metadata_json and upload.metadata_json.get("matched_upload_id"):
-
-
-
-        matched_upload_id = int(upload.metadata_json["matched_upload_id"])
-
-
-
-        matched_upload = db.query(models.Upload).filter(models.Upload.id == matched_upload_id).first()
-
-
-
-    
-
-
-
-    # 2. Try exact-hash lookup (catches 100% exact duplicates missed by metadata)
-
-
-
-    if not matched_upload and upload.hash:
-
-
-
+    # Step 2: If flagged as duplicate at upload time (has similarity_score >= 80 or duplicate_type),
+    # but metadata was missing, find the EARLIEST historical upload with identical hash submitted BEFORE this upload
+    if not matched_upload and upload.hash and ((upload.similarity_score is not None and upload.similarity_score >= 80.0) or upload.duplicate_type):
         matched_upload = (
-
-
-
             db.query(models.Upload)
-
-
-
-            .filter(models.Upload.hash == upload.hash, models.Upload.id != upload.id)
-
-
-
-            .order_by(models.Upload.id.asc())
-
-
-
+            .filter(
+                models.Upload.hash == upload.hash,
+                models.Upload.id < upload.id,
+                models.Upload.user_id != upload.user_id,
+                models.Upload.is_deleted == False
+            )
+            .order_by(models.Upload.upload_time.asc())
             .first()
-
-
-
         )
 
-
-
-
-
-
-
-    # 3. Fall back to matched_student name → same assignment or latest upload
-
-
-
-    if not matched_upload and upload.matched_student:
-
-
-
-        matched_user = db.query(models.User).filter(models.User.name == upload.matched_student).first()
-
-
-
+    # Step 3: If still not resolved and upload was flagged as similar with matched_student
+    if not matched_upload and upload.matched_student and (upload.similarity_score is not None and upload.similarity_score >= 80.0):
+        matched_user = db.query(models.User).filter(
+            models.User.name == upload.matched_student,
+            models.User.id != upload.user_id
+        ).first()
         if matched_user:
-
-
-
             matched_upload = (
-
-
-
                 db.query(models.Upload)
-
-
-
                 .filter(
-
-
-
                     models.Upload.user_id == matched_user.id,
-
-
-
-                    models.Upload.assignment_title == upload.assignment_title,
-
-
-
-                    models.Upload.id != upload.id,
-
-
-
+                    models.Upload.id < upload.id,
+                    models.Upload.is_deleted == False
                 )
-
-
-
+                .order_by(models.Upload.upload_time.desc())
                 .first()
-
-
-
             )
 
-
-
-            if not matched_upload:
-
-
-
-                matched_upload = (
-
-
-
-                    db.query(models.Upload)
-
-
-
-                    .filter(models.Upload.user_id == matched_user.id, models.Upload.id != upload.id)
-
-
-
-                    .order_by(models.Upload.upload_time.desc())
-
-
-
-                    .first()
-
-
-
-                )
-
-
-
-    
-
-
+    # ── VERIFY: SELF-COMPARISON AND FORWARD-IN-TIME COMPARISON ARE STRICTLY IMPOSSIBLE ──
+    if matched_upload:
+        if matched_upload.id >= upload.id or matched_upload.user_id == upload.user_id:
+            matched_upload = None
 
     original_text = upload.extracted_text or ""
-
-
-
     upload_pages = upload.metadata_json.get("pages_text", []) if isinstance(upload.metadata_json, dict) else []
 
-
-
-
-
-
-
-    # Run content comparison when a reference is available
-
-
-
-    if matched_upload and matched_upload.extracted_text:
-
-
-
-        matched_text = matched_upload.extracted_text
-
-
-
-
-
-
-
-        # is_file_exact: True when binary SHA-256 hashes are identical.
-
-
-
-        # Must also check matched_upload.hash, because the upload might be the
-
-
-
-        # first/reference upload (sim_score=None) but files are binary-identical.
-
-
-
-        hashes_identical = (
-
-
-
-            bool(upload.hash)
-
-
-
-            and bool(matched_upload.hash)
-
-
-
-            and upload.hash == matched_upload.hash
-
-
-
-        )
-
-
-
-        is_file_exact = hashes_identical or (
-
-
-
-            upload.similarity_score is not None and upload.similarity_score >= 99.9
-
-
-
-        )
-
-
-
-
-
-
-
-        comparison_data = compare_texts(
-
-
-
-            original_text, matched_text, upload_pages,
-
-
-
-            is_file_exact=is_file_exact
-
-
-
-        )
-
-
-
-    else:
-
-
-
-        # No reference available - return empty comparison with explicit unavailable state
-
-
-
-        comparison_data = {
-
-
-
+    # ── IF NO ELIGIBLE REFERENCE EXISTS: RETURN AUTHORITATIVE CLEAN RESULT ──
+    if not matched_upload or not matched_upload.extracted_text:
+        return {
+            "upload_id": upload.id,
+            "reference_upload_id": None,
+            "comparison_id": f"comp_clean_{upload.id}",
+            "direction": "ORIGINAL_SUBMISSION",
+            "similarity_status": "Clean",
+            "overall_similarity": 0.0,
+            "duplicate_type": "Clean",
+            "detection_method": "clean_verified",
+            "uploaded_document": {
+                "id": upload.id,
+                "file_name": upload.file_name,
+                "section_name": upload.section_name or (upload.owner.section_name if upload.owner else None) or "N/A",
+                "assignment_title": upload.assignment_title or (upload.assignment.title if upload.assignment else None) or "N/A",
+                "upload_time": format_datetime_ist(upload.upload_time),
+                "uploaded_by_name": upload.owner.name if upload.owner else "N/A",
+                "uploaded_by_email": upload.owner.email if upload.owner else "N/A",
+            },
+            "reference_document": None,
             "uploaded_highlighted": [],
-
-
-
             "matched_highlighted": [],
-
-
-
-            "ai_summary": {"copied": [], "similar": [], "unique": []},
-
-
-
+            "ai_summary": {
+                "copied": [],
+                "similar": [],
+                "unique": ["All content in this submission is original. No matching predecessor exists in the repository."],
+                "notes": "Verified Clean: Analysis completed. No qualifying duplicate predecessor was detected."
+            },
             "page_heatmap": [],
-
-
-
-            "breakdown": {},
-
-
-
-            "match_statistics": {},
-
-
-
-            "overall_similarity": None,
-
-
-
-            "detection_method": "unavailable",
-
-
-
+            "breakdown": {
+                "exact_match": 0.0,
+                "normalized_content": 0.0,
+                "lexical_similarity": 0.0,
+                "semantic_similarity": 0.0,
+                "sentence_similarity": 0.0,
+                "paragraph_similarity": 0.0
+            },
+            "match_statistics": {
+                "total_sentences": 0,
+                "matched_sentences": 0,
+                "total_paragraphs": 0,
+                "matched_paragraphs": 0,
+                "total_pages": len(upload_pages) if upload_pages else 1,
+                "matched_pages": 0
+            },
+            "evidence_records": []
         }
 
+    # ── GENUINE COMPARISON AGAINST HISTORICAL PREDECESSOR ──
+    matched_text = matched_upload.extracted_text
+    hashes_identical = (
+        bool(upload.hash)
+        and bool(matched_upload.hash)
+        and upload.hash == matched_upload.hash
+        and upload.id != matched_upload.id
+    )
 
+    is_file_exact = hashes_identical or (
+        upload.similarity_score is not None and upload.similarity_score >= 99.9
+    )
 
-
-
-
-
-    # Single authoritative overall_similarity.
-
-
-
-    # Use compare_texts result as truth when comparison ran.
-
-
-
-    # This fixes the '0% overall but 100% components' bug for reference/first
-
-
-
-    # uploads whose stored sim_score is None (None or 0.0 bug).
-
-
+    comparison_data = compare_texts(
+        original_text, matched_text, upload_pages,
+        is_file_exact=is_file_exact
+    )
 
     computed_similarity = comparison_data.get("overall_similarity")
+    stored_similarity = upload.similarity_score
 
-
-
-    stored_similarity = upload.similarity_score  # may be None for first uploads
-
-
-
-
-
-
-
-    if computed_similarity is not None:
-
-
-
-        detection_method = comparison_data.get("detection_method", "")
-
-
-
-        if "exact" in (detection_method or ""):
-
-
-
-            # Exact content/hash match is definitive: always 100%.
-
-
-
-            authoritative_similarity = 100.0
-
-
-
-        elif stored_similarity is not None and stored_similarity > computed_similarity + 2:
-
-
-
-            # Stored score was validated at upload time; if significantly higher,
-
-
-
-            # prefer it to avoid regression for existing records.
-
-
-
-            authoritative_similarity = stored_similarity
-
-
-
-        else:
-
-
-
-            authoritative_similarity = computed_similarity
-
-
-
+    if is_file_exact:
+        authoritative_similarity = 100.0
+        detection_method = "exact_file_hash" if hashes_identical else "exact_content"
+        dup_type = "Exact Duplicate"
+        sim_status = "Exact Duplicate"
+    elif computed_similarity is not None:
+        authoritative_similarity = computed_similarity
+        detection_method = comparison_data.get("detection_method", "hybrid_similarity")
+        dup_type = "Similar Duplicate" if authoritative_similarity >= 80.0 else "Clean"
+        sim_status = "Potential Match" if authoritative_similarity >= 80.0 else "Clean"
     else:
+        authoritative_similarity = stored_similarity if stored_similarity is not None else 0.0
+        detection_method = "hybrid_similarity"
+        dup_type = upload.duplicate_type or "Clean"
+        sim_status = "Potential Match" if authoritative_similarity >= 80.0 else "Clean"
 
-
-
-        # No comparison ran - use stored score (may still be None for reference uploads).
-
-
-
-        authoritative_similarity = stored_similarity
-
-
-
-
-
-
-
-    
     # Persist evidence records if newly detected
     if comparison_data.get("evidence_records"):
         try:
@@ -5463,7 +5151,7 @@ def compare_uploads(upload_id: int, current_user: models.User = Depends(require_
                 for ev in comparison_data["evidence_records"]:
                     ev_row = models.SubmissionEvidence(
                         upload_id=upload.id,
-                        reference_upload_id=matched_upload.id if matched_upload else None,
+                        reference_upload_id=matched_upload.id,
                         matched_sentence=ev.get("matched_sentence"),
                         reference_sentence=ev.get("reference_sentence"),
                         uploaded_page=ev.get("uploaded_page"),
@@ -5485,167 +5173,39 @@ def compare_uploads(upload_id: int, current_user: models.User = Depends(require_
             db.rollback()
 
     return {
-
-
-
         "upload_id": upload.id,
-
-
-
-        "reference_upload_id": matched_upload.id if matched_upload else None,
-
-
-
-
-
-
-
-        "uploaded_document": {
-
-
-
-            "id": upload.id,
-
-
-
-            "file_name": upload.file_name,
-
-
-
-            "section_name": upload.section_name,
-
-
-
-            "assignment_title": upload.assignment_title,
-
-
-
-            "upload_time": upload.upload_time.strftime("%d-%m-%Y | %I:%M %p IST") if upload.upload_time else "Unknown"
-
-
-
-        },
-
-
-
-
-
-
-
-        "reference_document": {
-
-
-
-            "id": matched_upload.id if matched_upload else None,
-
-
-
-            "file_name": matched_upload.file_name if matched_upload else None,
-
-
-
-            "section_name": matched_upload.section_name if matched_upload else None,
-
-
-
-            "assignment_title": matched_upload.assignment_title if matched_upload else None,
-
-
-
-            "matched_student": (
-
-
-
-                matched_upload.owner.name
-
-
-
-                if matched_upload and matched_upload.owner
-
-
-
-                else (upload.matched_student or None)
-
-
-
-            ),
-
-
-
-            "upload_time": (
-
-
-
-                matched_upload.upload_time.strftime("%d-%m-%Y | %I:%M %p IST")
-
-
-
-                if matched_upload and matched_upload.upload_time else None
-
-
-
-            )
-
-
-
-        },
-
-
-
-
-
-
-
-        # Single authoritative score. Never collapses None to 0 for reference uploads.
-
-
-
+        "reference_upload_id": matched_upload.id,
+        "comparison_id": f"comp_{upload.id}_{matched_upload.id}",
+        "direction": "NEW_SUBMISSION -> EXISTING_REFERENCE",
+        "similarity_status": sim_status,
         "overall_similarity": authoritative_similarity,
-
-
-
-        "duplicate_type": upload.duplicate_type,
-
-
-
-        "detection_method": comparison_data.get("detection_method"),
-
-
-
-
-
-
-
+        "duplicate_type": dup_type,
+        "detection_method": detection_method,
+        "uploaded_document": {
+            "id": upload.id,
+            "file_name": upload.file_name,
+            "section_name": upload.section_name or (upload.owner.section_name if upload.owner else None) or "N/A",
+            "assignment_title": upload.assignment_title or (upload.assignment.title if upload.assignment else None) or "N/A",
+            "upload_time": format_datetime_ist(upload.upload_time),
+            "uploaded_by_name": upload.owner.name if upload.owner else "N/A",
+            "uploaded_by_email": upload.owner.email if upload.owner else "N/A",
+        },
+        "reference_document": {
+            "id": matched_upload.id,
+            "file_name": matched_upload.file_name,
+            "section_name": matched_upload.section_name or (matched_upload.owner.section_name if matched_upload.owner else None) or "N/A",
+            "assignment_title": matched_upload.assignment_title or (matched_upload.assignment.title if matched_upload.assignment else None) or "N/A",
+            "matched_student": matched_upload.owner.name if matched_upload.owner else (upload.matched_student or "Historical Reference"),
+            "upload_time": format_datetime_ist(matched_upload.upload_time),
+        },
         "uploaded_highlighted": comparison_data["uploaded_highlighted"],
-
-
-
         "matched_highlighted": comparison_data["matched_highlighted"],
-
-
-
         "ai_summary": comparison_data.get("ai_summary", {}),
-
-
-
         "page_heatmap": comparison_data.get("page_heatmap", []),
-
-
-
         "breakdown": comparison_data.get("breakdown", {}),
-
-
-
         "match_statistics": comparison_data.get("match_statistics", {}),
         "evidence_records": comparison_data.get("evidence_records", []),
-
-
-
     }
-
-
-
-
 
 
 
@@ -5727,141 +5287,80 @@ def download_highlighted_pdf(upload_id: int, type: str = "uploaded", current_use
             return Response(content=f.read(), media_type="application/pdf")
 
 @router.get("/admin/uploads")
-
-
-
-def get_all_uploads(current_user: models.User = Depends(require_roles("admin", "hod")), db: Session = Depends(get_db)):
-
-
-
+def get_all_uploads(
+    current_user: models.User = Depends(require_roles("admin", "hod")), 
+    db: Session = Depends(get_db)
+):
+    """
+    Submissions list for Admin and HOD.
+    Returns consistent similarity_status, file size on disk, resolved section, and actual upload timestamp.
+    """
     query = db.query(models.Upload, models.User).join(
-
-
-
         models.User, models.Upload.user_id == models.User.id
-
-
-
+    ).filter(
+        models.Upload.is_deleted == False
     )
 
-
-
     if normalize_role(current_user.role) == "hod":
-
-
-
         dept = current_user.department or "Computer Science"
-
-
-
         sections = db.query(models.Section).filter(models.Section.department == dept).all()
-
-
-
         sec_names = [s.name for s in sections]
-
-
-
         query = query.filter(models.Upload.section_name.in_(sec_names))
-
-
-
-
-
-
 
     uploads_with_users = query.order_by(models.Upload.upload_time.desc()).all()
 
-
-
-
-
-
-
     results = []
-
-
-
     for upload, user in uploads_with_users:
+        # Determine file size
+        file_size_bytes = 0
+        if upload.file_path and os.path.exists(upload.file_path):
+            try:
+                file_size_bytes = os.path.getsize(upload.file_path)
+            except Exception:
+                pass
 
+        if file_size_bytes >= 1024 * 1024:
+            file_size_formatted = f"{file_size_bytes / (1024 * 1024):.1f} MB"
+        elif file_size_bytes > 0:
+            file_size_formatted = f"{file_size_bytes / 1024:.1f} KB"
+        else:
+            file_size_formatted = "N/A"
 
+        # Determine authoritative similarity status
+        sim_score = upload.similarity_score
+        if sim_score is not None and sim_score >= 99.9:
+            sim_status = "Exact Duplicate"
+        elif sim_score is not None and sim_score >= 80.0:
+            sim_status = "Potential Match"
+        elif upload.extracted_text is not None:
+            sim_status = "Clean"
+        else:
+            sim_status = "Pending Analysis"
+
+        eval_record = db.query(models.Evaluation).filter(models.Evaluation.upload_id == upload.id).first()
 
         results.append({
-
-
-
             "id": upload.id,
-
-
-
             "file_name": upload.file_name,
-
-
-
             "file_type": upload.file_type,
-
-
-
+            "file_size_bytes": file_size_bytes,
+            "file_size_formatted": file_size_formatted,
             "uploaded_by_name": user.name,
-
-
-
             "uploaded_by_email": user.email,
-
-
-
             "registration_number": user.registration_number or "N/A",
-
-
-
-            "upload_time": upload.upload_time.strftime("%d-%m-%Y | %I:%M %p IST") if upload.upload_time else "",
-
-
-
-            "section_name": upload.section_name or "No Section",
-
-
-
-            "assignment_title": upload.assignment_title or "No Title",
-
-
-
-            "similarity_score": upload.similarity_score or 0.0,
-
-
-
-            "duplicate_type": upload.duplicate_type,
-
-
-
-            "extracted_text": upload.extracted_text,
-
-
-
-            "is_duplicate": (upload.similarity_score or 0) >= 90.0,
+            "upload_time": format_datetime_ist(upload.upload_time),
+            "section_name": upload.section_name or user.section_name or "N/A",
+            "assignment_title": upload.assignment_title or (upload.assignment.title if upload.assignment else None) or "N/A",
+            "similarity_score": sim_score if sim_score is not None else 0.0,
+            "similarity_status": sim_status,
+            "duplicate_type": upload.duplicate_type or sim_status,
+            "is_duplicate": (sim_score or 0) >= 80.0,
             "version": upload.version or 1,
-            "evaluation_status": upload.evaluation_record[0].status if (hasattr(upload, "evaluation_record") and upload.evaluation_record) else "Pending Evaluation",
-            "marks": upload.evaluation_record[0].marks if (hasattr(upload, "evaluation_record") and upload.evaluation_record) else None
-
-
-
+            "evaluation_status": eval_record.status if eval_record else "Pending Evaluation",
+            "marks": eval_record.marks if eval_record else None
         })
 
-
-
     return results
-
-
-
-
-
-
-
-from fastapi.responses import FileResponse
-
-
-
-
 
 
 
@@ -6895,6 +6394,28 @@ class AssignmentUpdate(BaseModel):
 class AssignmentStatusUpdate(BaseModel):
     status: str
 
+
+def format_datetime_ist(dt) -> str:
+    """Formats any timestamp consistently to Institutional Timezone Asia/Kolkata (IST)."""
+    if not dt:
+        return "N/A"
+    try:
+        if isinstance(dt, str):
+            if "IST" in dt:
+                return dt
+            try:
+                dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+            except Exception:
+                return dt
+        from zoneinfo import ZoneInfo
+        ist_zone = ZoneInfo("Asia/Kolkata")
+        if getattr(dt, "tzinfo", None) is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        ist_dt = dt.astimezone(ist_zone)
+        return ist_dt.strftime("%d-%m-%Y | %I:%M %p IST")
+    except Exception:
+        return str(dt)
+
 def parse_date_str(d_str: Optional[str]) -> Optional[datetime]:
     if not d_str:
         return None
@@ -7468,3 +6989,518 @@ def mark_all_notifications_read(
     ).update({"is_read": True})
     db.commit()
     return {"status": "success"}
+
+
+
+# =========================================================================
+# ADMINISTRATOR STORAGE, SUBMISSION DELETION & AUDIT LOGGING ENDPOINTS
+# =========================================================================
+
+class BulkUploadDeleteRequest(BaseModel):
+    upload_ids: List[int]
+    permanent: bool = True
+
+class DeleteAllSubmissionsRequest(BaseModel):
+    confirmation_phrase: str
+
+class BulkUserDeleteRequest(BaseModel):
+    user_ids: List[int]
+    preserve_academic_records: bool = True
+
+class DeleteAllUsersRequest(BaseModel):
+    confirmation_phrase: str
+    preserve_academic_records: bool = True
+
+@router.get("/admin/storage-stats")
+def get_storage_stats(
+    current_user: models.User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db)
+):
+    """Computes real-time physical disk storage used by submissions and identifies orphaned files."""
+    uploads = db.query(models.Upload).filter(models.Upload.is_deleted == False).all()
+    total_count = len(uploads)
+    total_bytes = 0
+    tracked_file_paths = set()
+
+    for u in uploads:
+        if u.file_path and os.path.exists(u.file_path):
+            try:
+                sz = os.path.getsize(u.file_path)
+                total_bytes += sz
+                tracked_file_paths.add(os.path.abspath(u.file_path))
+            except Exception:
+                pass
+
+    orphaned_bytes = 0
+    orphaned_count = 0
+    if os.path.exists(UPLOAD_DIR):
+        for fname in os.listdir(UPLOAD_DIR):
+            fpath = os.path.abspath(os.path.join(UPLOAD_DIR, fname))
+            if os.path.isfile(fpath) and fpath not in tracked_file_paths:
+                try:
+                    orphaned_bytes += os.path.getsize(fpath)
+                    orphaned_count += 1
+                except Exception:
+                    pass
+
+    return {
+        "total_submissions": total_count,
+        "total_storage_bytes": total_bytes,
+        "total_storage_mb": round(total_bytes / (1024 * 1024), 2),
+        "orphaned_count": orphaned_count,
+        "orphaned_files_count": orphaned_count,
+        "orphaned_storage_bytes": orphaned_bytes,
+        "orphaned_files_bytes": orphaned_bytes,
+        "orphaned_storage_mb": round(orphaned_bytes / (1024 * 1024), 2),
+        "orphaned_files_mb": round(orphaned_bytes / (1024 * 1024), 2)
+    }
+
+@router.delete("/admin/uploads/{upload_id}")
+def delete_individual_upload(
+    upload_id: int,
+    permanent: bool = Query(True),
+    current_user: models.User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db)
+):
+    """Deletes an individual submission, cleans physical files if unreferenced, cleans ChromaDB, and logs audit record."""
+    upload = db.query(models.Upload).filter(models.Upload.id == upload_id).first()
+    if not upload:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    bytes_reclaimed = 0
+    file_path = upload.file_path
+    file_name = upload.file_name
+    student_name = upload.owner.name if upload.owner else "Unknown"
+
+    from ai_engine import delete_from_chroma
+    try:
+        delete_from_chroma([str(upload.id)])
+    except Exception as e:
+        logger.warning(f"ChromaDB deletion error: {e}")
+
+    # Clean dependent DB records
+    db.query(models.SubmissionEvidence).filter(
+        (models.SubmissionEvidence.upload_id == upload.id) | 
+        (models.SubmissionEvidence.reference_upload_id == upload.id)
+    ).delete(synchronize_session=False)
+
+    db.query(models.Evaluation).filter(models.Evaluation.upload_id == upload.id).delete(synchronize_session=False)
+    db.query(models.OnlineSourceResult).filter(models.OnlineSourceResult.upload_id == upload.id).delete(synchronize_session=False)
+    db.query(models.OnlineSourceJob).filter(models.OnlineSourceJob.upload_id == upload.id).delete(synchronize_session=False)
+    db.query(models.Upload).filter(models.Upload.parent_upload_id == upload.id).update({"parent_upload_id": None})
+
+    # Physical file cleanup if no other upload record references it
+    if file_path and os.path.exists(file_path):
+        other_refs = db.query(models.Upload).filter(
+            models.Upload.file_path == file_path,
+            models.Upload.id != upload.id
+        ).count()
+        if other_refs == 0:
+            try:
+                bytes_reclaimed = os.path.getsize(file_path)
+                os.remove(file_path)
+            except Exception as e:
+                logger.warning(f"File removal error: {e}")
+
+    db.delete(upload)
+
+    audit = models.AuditLog(
+        admin_id=current_user.id,
+        admin_email=current_user.email,
+        action_type="DELETE_SUBMISSION",
+        target_id=str(upload_id),
+        target_type="Upload",
+        details={
+            "file_name": file_name,
+            "student_name": student_name,
+            "bytes_reclaimed": bytes_reclaimed
+        },
+        timestamp=datetime.now(timezone.utc)
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "success": True,
+        "deleted_upload_id": upload_id,
+        "message": f"Submission '{file_name}' deleted successfully",
+        "bytes_reclaimed": bytes_reclaimed
+    }
+
+@router.post("/admin/uploads/bulk-delete")
+def bulk_delete_uploads(
+    data: BulkUploadDeleteRequest,
+    current_user: models.User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db)
+):
+    """Deletes multiple selected submissions in a batch transaction."""
+    if not data.upload_ids:
+        raise HTTPException(status_code=400, detail="No submission IDs provided for deletion")
+
+    deleted_count = 0
+    total_bytes_reclaimed = 0
+    failed_ids = []
+
+    from ai_engine import delete_from_chroma
+
+    for uid in data.upload_ids:
+        upload = db.query(models.Upload).filter(models.Upload.id == uid).first()
+        if not upload:
+            failed_ids.append(uid)
+            continue
+
+        file_path = upload.file_path
+        try:
+            delete_from_chroma([str(upload.id)])
+        except Exception:
+            pass
+
+        db.query(models.SubmissionEvidence).filter(
+            (models.SubmissionEvidence.upload_id == upload.id) | 
+            (models.SubmissionEvidence.reference_upload_id == upload.id)
+        ).delete(synchronize_session=False)
+
+        db.query(models.Evaluation).filter(models.Evaluation.upload_id == upload.id).delete(synchronize_session=False)
+        db.query(models.OnlineSourceResult).filter(models.OnlineSourceResult.upload_id == upload.id).delete(synchronize_session=False)
+        db.query(models.OnlineSourceJob).filter(models.OnlineSourceJob.upload_id == upload.id).delete(synchronize_session=False)
+        db.query(models.Upload).filter(models.Upload.parent_upload_id == upload.id).update({"parent_upload_id": None})
+
+        if file_path and os.path.exists(file_path):
+            other_refs = db.query(models.Upload).filter(
+                models.Upload.file_path == file_path,
+                models.Upload.id != upload.id
+            ).count()
+            if other_refs == 0:
+                try:
+                    total_bytes_reclaimed += os.path.getsize(file_path)
+                    os.remove(file_path)
+                except Exception:
+                    pass
+
+        db.delete(upload)
+        deleted_count += 1
+
+    audit = models.AuditLog(
+        admin_id=current_user.id,
+        admin_email=current_user.email,
+        action_type="BULK_DELETE_SUBMISSIONS",
+        target_id=str(data.upload_ids),
+        target_type="Upload",
+        details={
+            "deleted_count": deleted_count,
+            "total_bytes_reclaimed": total_bytes_reclaimed,
+            "failed_ids": failed_ids
+        },
+        timestamp=datetime.now(timezone.utc)
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "success": True,
+        "deleted_count": deleted_count,
+        "total_bytes_reclaimed": total_bytes_reclaimed,
+        "failed_ids": failed_ids
+    }
+
+@router.post("/admin/uploads/delete-all")
+def delete_all_submissions(
+    data: DeleteAllSubmissionsRequest,
+    current_user: models.User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db)
+):
+    """High-risk workflow: Deletes all submissions while preserving assignments, sections, and users."""
+    if data.confirmation_phrase.strip().upper() != "DELETE ALL SUBMISSIONS":
+        raise HTTPException(
+            status_code=400, 
+            detail="Confirmation phrase mismatch. Please type exactly 'DELETE ALL SUBMISSIONS' to authorize."
+        )
+
+    uploads = db.query(models.Upload).all()
+    deleted_count = len(uploads)
+    total_bytes_reclaimed = 0
+
+    from ai_engine import delete_from_chroma
+    try:
+        delete_from_chroma([str(u.id) for u in uploads])
+    except Exception:
+        pass
+
+    db.query(models.SubmissionEvidence).delete(synchronize_session=False)
+    db.query(models.Evaluation).delete(synchronize_session=False)
+    db.query(models.OnlineSourceResult).delete(synchronize_session=False)
+    db.query(models.OnlineSourceJob).delete(synchronize_session=False)
+
+    if os.path.exists(UPLOAD_DIR):
+        for fname in os.listdir(UPLOAD_DIR):
+            fpath = os.path.join(UPLOAD_DIR, fname)
+            if os.path.isfile(fpath):
+                try:
+                    total_bytes_reclaimed += os.path.getsize(fpath)
+                    os.remove(fpath)
+                except Exception:
+                    pass
+
+    db.query(models.Upload).delete(synchronize_session=False)
+
+    audit = models.AuditLog(
+        admin_id=current_user.id,
+        admin_email=current_user.email,
+        action_type="DELETE_ALL_SUBMISSIONS",
+        target_id="ALL",
+        target_type="Upload",
+        details={
+            "deleted_count": deleted_count,
+            "total_bytes_reclaimed": total_bytes_reclaimed
+        },
+        timestamp=datetime.now(timezone.utc)
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "success": True,
+        "deleted_count": deleted_count,
+        "total_bytes_reclaimed": total_bytes_reclaimed,
+        "message": f"Successfully deleted all {deleted_count} submissions and reclaimed {round(total_bytes_reclaimed / (1024*1024), 2)} MB of storage."
+    }
+
+# =========================================================================
+# ADMINISTRATOR USER MANAGEMENT & DELETION ENDPOINTS
+# =========================================================================
+
+@router.delete("/admin/users/{user_id}")
+def delete_user(
+    user_id: int,
+    preserve_academic_records: bool = Query(True),
+    current_user: models.User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db)
+):
+    """Deletes or archives a user account with strict safeguards protecting administrators and academic records."""
+    if user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot delete your own administrator account.")
+
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User account not found")
+
+    if user.role == "admin":
+        active_admins = db.query(models.User).filter(
+            models.User.role == "admin",
+            models.User.is_deleted == False
+        ).count()
+        if active_admins <= 1:
+            raise HTTPException(status_code=400, detail="Cannot delete the last active Administrator account. The system requires at least one active administrator.")
+
+    user_email = user.email
+    user_role = user.role
+    user_name = user.name
+
+    if preserve_academic_records:
+        user.is_active = False
+        user.is_deleted = True
+        user.name = f"{user_name} [Archived]"
+        db.query(models.EvaluatorSection).filter(models.EvaluatorSection.evaluator_id == user.id).delete(synchronize_session=False)
+        db.query(models.Notification).filter(models.Notification.user_id == user.id).delete(synchronize_session=False)
+    else:
+        user_uploads = db.query(models.Upload).filter(models.Upload.user_id == user.id).all()
+        from ai_engine import delete_from_chroma
+        try:
+            delete_from_chroma([str(u.id) for u in user_uploads])
+        except Exception:
+            pass
+
+        for u in user_uploads:
+            if u.file_path and os.path.exists(u.file_path):
+                try:
+                    os.remove(u.file_path)
+                except Exception:
+                    pass
+            db.query(models.SubmissionEvidence).filter(
+                (models.SubmissionEvidence.upload_id == u.id) | 
+                (models.SubmissionEvidence.reference_upload_id == u.id)
+            ).delete(synchronize_session=False)
+            db.query(models.Evaluation).filter(models.Evaluation.upload_id == u.id).delete(synchronize_session=False)
+            db.delete(u)
+
+        db.query(models.EvaluatorSection).filter(models.EvaluatorSection.evaluator_id == user.id).delete(synchronize_session=False)
+        db.query(models.Notification).filter(models.Notification.user_id == user.id).delete(synchronize_session=False)
+        db.delete(user)
+
+    audit = models.AuditLog(
+        admin_id=current_user.id,
+        admin_email=current_user.email,
+        action_type="DELETE_USER",
+        target_id=str(user_id),
+        target_type="User",
+        details={
+            "name": user_name,
+            "email": user_email,
+            "role": user_role,
+            "preserved_academic_records": preserve_academic_records
+        },
+        timestamp=datetime.now(timezone.utc)
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "success": True,
+        "status": "archived" if preserve_academic_records else "deleted",
+        "message": f"User '{user_email}' ({user_role}) {'archived and academic records preserved' if preserve_academic_records else 'permanently removed'} successfully."
+    }
+
+@router.post("/admin/users/bulk-delete")
+def bulk_delete_users(
+    data: BulkUserDeleteRequest,
+    current_user: models.User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db)
+):
+    """Bulk deletes selected users with administrator protection."""
+    if not data.user_ids:
+        raise HTTPException(status_code=400, detail="No user IDs provided")
+
+    target_ids = [uid for uid in data.user_ids if uid != current_user.id]
+    if not target_ids:
+        raise HTTPException(status_code=400, detail="Cannot delete your own administrator account.")
+
+    deleted_count = 0
+    for uid in target_ids:
+        u = db.query(models.User).filter(models.User.id == uid).first()
+        if not u:
+            continue
+        if u.role == "admin":
+            active_admins = db.query(models.User).filter(
+                models.User.role == "admin",
+                models.User.is_deleted == False
+            ).count()
+            if active_admins <= 1:
+                continue
+
+        if data.preserve_academic_records:
+            u.is_active = False
+            u.is_deleted = True
+            u.name = f"{u.name} [Archived]"
+            db.query(models.EvaluatorSection).filter(models.EvaluatorSection.evaluator_id == u.id).delete(synchronize_session=False)
+            db.query(models.Notification).filter(models.Notification.user_id == u.id).delete(synchronize_session=False)
+        else:
+            ups = db.query(models.Upload).filter(models.Upload.user_id == u.id).all()
+            for up in ups:
+                if up.file_path and os.path.exists(up.file_path):
+                    try:
+                        os.remove(up.file_path)
+                    except Exception:
+                        pass
+                db.query(models.SubmissionEvidence).filter(
+                    (models.SubmissionEvidence.upload_id == up.id) | 
+                    (models.SubmissionEvidence.reference_upload_id == up.id)
+                ).delete(synchronize_session=False)
+                db.query(models.Evaluation).filter(models.Evaluation.upload_id == up.id).delete(synchronize_session=False)
+                db.delete(up)
+            db.query(models.EvaluatorSection).filter(models.EvaluatorSection.evaluator_id == u.id).delete(synchronize_session=False)
+            db.query(models.Notification).filter(models.Notification.user_id == u.id).delete(synchronize_session=False)
+            db.delete(u)
+
+        deleted_count += 1
+
+    audit = models.AuditLog(
+        admin_id=current_user.id,
+        admin_email=current_user.email,
+        action_type="BULK_DELETE_USERS",
+        target_id=str(target_ids),
+        target_type="User",
+        details={
+            "deleted_count": deleted_count,
+            "preserved_records": data.preserve_academic_records
+        },
+        timestamp=datetime.now(timezone.utc)
+    )
+    db.add(audit)
+    db.commit()
+
+    return {"success": True, "deleted_count": deleted_count}
+
+@router.post("/admin/users/delete-all")
+def delete_all_users(
+    data: DeleteAllUsersRequest,
+    current_user: models.User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db)
+):
+    """High-risk action: Deletes all user accounts while permanently protecting the active administrator."""
+    if data.confirmation_phrase.strip().upper() != "DELETE ALL USERS":
+        raise HTTPException(
+            status_code=400, 
+            detail="Confirmation phrase mismatch. Please type exactly 'DELETE ALL USERS' to authorize."
+        )
+
+    other_users = db.query(models.User).filter(models.User.id != current_user.id).all()
+    deleted_count = len(other_users)
+
+    for u in other_users:
+        if data.preserve_academic_records:
+            u.is_active = False
+            u.is_deleted = True
+            u.name = f"{u.name} [Archived]"
+            db.query(models.EvaluatorSection).filter(models.EvaluatorSection.evaluator_id == u.id).delete(synchronize_session=False)
+            db.query(models.Notification).filter(models.Notification.user_id == u.id).delete(synchronize_session=False)
+        else:
+            ups = db.query(models.Upload).filter(models.Upload.user_id == u.id).all()
+            for up in ups:
+                if up.file_path and os.path.exists(up.file_path):
+                    try:
+                        os.remove(up.file_path)
+                    except Exception:
+                        pass
+                db.query(models.SubmissionEvidence).filter(
+                    (models.SubmissionEvidence.upload_id == up.id) | 
+                    (models.SubmissionEvidence.reference_upload_id == up.id)
+                ).delete(synchronize_session=False)
+                db.query(models.Evaluation).filter(models.Evaluation.upload_id == up.id).delete(synchronize_session=False)
+                db.delete(up)
+            db.query(models.EvaluatorSection).filter(models.EvaluatorSection.evaluator_id == u.id).delete(synchronize_session=False)
+            db.query(models.Notification).filter(models.Notification.user_id == u.id).delete(synchronize_session=False)
+            db.delete(u)
+
+    audit = models.AuditLog(
+        admin_id=current_user.id,
+        admin_email=current_user.email,
+        action_type="DELETE_ALL_USERS",
+        target_id="ALL_EXCEPT_CURRENT_ADMIN",
+        target_type="User",
+        details={
+            "deleted_count": deleted_count,
+            "protected_admin": current_user.email
+        },
+        timestamp=datetime.now(timezone.utc)
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "success": True,
+        "deleted_count": deleted_count,
+        "message": f"Successfully processed {deleted_count} user accounts. The active administrator account ({current_user.email}) remains protected and active."
+    }
+
+@router.get("/admin/audit-logs")
+def get_audit_logs(
+    limit: int = 50,
+    current_user: models.User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db)
+):
+    """Retrieves immutable audit trail of administrative destructive actions and role modifications."""
+    logs = db.query(models.AuditLog).order_by(models.AuditLog.timestamp.desc()).limit(limit).all()
+    return [
+        {
+            "id": l.id,
+            "admin_id": l.admin_id,
+            "admin_email": l.admin_email,
+            "admin_name": l.admin_email,
+            "action_type": l.action_type,
+            "target_id": l.target_id,
+            "target_type": l.target_type,
+            "details": str(l.details) if isinstance(l.details, (dict, list)) else (l.details or ""),
+            "timestamp": format_datetime_ist(l.timestamp)
+        }
+        for l in logs
+    ]

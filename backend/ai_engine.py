@@ -58,3 +58,24 @@ def search_similar(embedding: list, threshold=0.85):
                 "all_distances": distances
             }
     return {"is_similar": False}
+
+def delete_from_chroma(upload_ids: list):
+    """Safely delete vector embeddings from ChromaDB by upload IDs and metadata."""
+    if not upload_ids:
+        return
+    ids_to_del = [str(uid) for uid in upload_ids if uid is not None]
+    if not ids_to_del:
+        return
+
+    try:
+        collection.delete(ids=ids_to_del)
+    except Exception as e:
+        pass
+
+    # Also clean by metadata where upload_id is stored
+    for uid in ids_to_del:
+        try:
+            int_id = int(uid) if uid.isdigit() else uid
+            collection.delete(where={"upload_id": int_id})
+        except Exception:
+            pass

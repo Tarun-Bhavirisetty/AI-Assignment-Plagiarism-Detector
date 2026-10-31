@@ -6,6 +6,12 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+if DATABASE_URL and DATABASE_URL.startswith("sqlite:///./"):
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    relative_part = DATABASE_URL[len("sqlite:///./"):]
+    candidate = os.path.join(backend_dir, relative_part)
+    if os.path.exists(candidate):
+        DATABASE_URL = f"sqlite:///{candidate}"
 
 engine = create_engine(
     DATABASE_URL,

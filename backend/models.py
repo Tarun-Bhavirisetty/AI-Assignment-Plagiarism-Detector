@@ -15,6 +15,8 @@ class User(Base):
     department = Column(String, default="Computer Science")
     section_name = Column(String, default="CSE-A", index=True, nullable=True) # Student section assignment (e.g. CSE-A)
     is_verified = Column(Boolean, default=False)
+    is_active = Column(Boolean, default=True)
+    is_deleted = Column(Boolean, default=False)
     verification_token = Column(String, nullable=True, index=True)
     verification_token_expires = Column(DateTime, nullable=True)
     
@@ -121,6 +123,8 @@ class Upload(Base):
     section_name = Column(String, nullable=True)
     assignment_title = Column(String, nullable=True)
     duplicate_type = Column(String, nullable=True)
+    similarity_status = Column(String, default="Clean", nullable=True) # Clean, Potential Match, Exact Duplicate, Pending Analysis, Processing, Analysis Failed
+    is_deleted = Column(Boolean, default=False)
     matched_student = Column(String, nullable=True)
     is_late = Column(Boolean, default=False)
     version = Column(Integer, default=1)
@@ -243,3 +247,18 @@ class Notification(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", backref="notifications")
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    admin_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    admin_email = Column(String, nullable=True)
+    action_type = Column(String, index=True)  # DELETE_SUBMISSION, BULK_DELETE_SUBMISSIONS, DELETE_ALL_SUBMISSIONS, DELETE_USER, BULK_DELETE_USERS, DELETE_ALL_USERS, ROLE_CHANGE
+    target_id = Column(String, nullable=True)
+    target_type = Column(String, nullable=True)  # Upload, User, Assignment
+    details = Column(JSON, nullable=True)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    ip_address = Column(String, nullable=True)
+
+    admin = relationship("User", backref="audit_logs", foreign_keys=[admin_id])
